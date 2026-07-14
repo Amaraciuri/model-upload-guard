@@ -104,30 +104,58 @@ def apply_changes(
     original, changes, manifest = compute_changes(workspace, config, include_patches=False)
     blocked = [change for change in changes if change.action == "blocked"]
     actionable = [change for change in changes if change.action != "blocked"]
-    if blocked:
-        paths = ", ".join(change.path for change in blocked[:5])
-        suffix = "..." if len(blocked) > 5 else ""
-        raise MugError(f"Blocked or conflicting changes detected: {paths}{suffix}. Review `mug diff`.")
-    if len(actionable) > config.max_changes and not force:
-        raise MugError(f"Change set contains {len(actionable)} files; configured maximum is {config.max_changes}.")
-
+    protected_blocked = [
+        change for change in blocked if "Protected path" in change.reason
+    ]
     source_files = manifest.get("source_files", {})
     if not isinstance(source_files, dict):
         raise MugError("Invalid workspace manifest during apply validation")
     delete_changes = [change for change in actionable if change.action == "delete"]
     denominator = max(1, len(source_files))
     delete_ratio = len(delete_changes) / denominator
+    policy = {
+        "max_changes": config.max_changes,
+        "max_delete_ratio": config.max_delete_ratio,
+        "changes": len(actionable),
+        "deletes": len(delete_changes),
+        "delete_ratio": round(delete_ratio, 4),
+        "protected_blocked": len(protected_blocked),
+        "force_overrides": "volume and git checks only — never protected paths",
+        "configure": "edit [apply] in .mug.toml (max_changes, max_delete_ratio, protected_add)",
+    }
+
+    if blocked:
+        paths = ", ".join(change.path for change in blocked[:5])
+        suffix = "..." if len(blocked) > 5 else ""
+        raise MugError(f"Blocked or conflicting changes detected: {paths}{suffix}. Review `mug diff`.")
+    if len(actionable) > config.max_changes and not force:
+        raise MugError(
+            f"Change set contains {len(actionable)} files; configured maximum is {config.max_changes} "
+            f"(set apply.max_changes in .mug.toml, or pass --force for volume only)."
+        )
     if delete_changes and not allow_delete:
-        raise MugError("Workspace deletes files. Re-run with --allow-delete after reviewing the diff.")
+        raise MugError(
+            f"Workspace deletes {len(delete_changes)} file(s) "
+            f"({delete_ratio:.1%} of exported set; limit apply.max_delete_ratio="
+            f"{config.max_delete_ratio:.1%}). Re-run with --allow-delete after reviewing the diff."
+        )
     if delete_ratio > config.max_delete_ratio and not force:
         raise MugError(
-            f"Deletion ratio {delete_ratio:.1%} exceeds configured maximum {config.max_delete_ratio:.1%}."
+            f"Deletion ratio {delete_ratio:.1%} exceeds configured maximum {config.max_delete_ratio:.1%} "
+            f"(apply.max_delete_ratio in .mug.toml). --force overrides this volume check only."
         )
     if not yes and not dry_run:
         raise MugError("Apply is confirmation-gated. Re-run with --yes after reviewing `mug diff`.")
 
     if not actionable:
-        return {"snapshot": None, "applied": [], "count": 0, "dry_run": dry_run, "git_warnings": []}
+        return {
+            "snapshot": None,
+            "applied": [],
+            "count": 0,
+            "dry_run": dry_run,
+            "git_warnings": [],
+            "policy": policy,
+        }
 
     sealed_head = manifest.get("git_head")
     sealed_head_str = str(sealed_head) if isinstance(sealed_head, str) and sealed_head else None
@@ -140,6 +168,7 @@ def apply_changes(
             "count": len(actionable),
             "dry_run": True,
             "git_warnings": git_warnings,
+            "policy": policy,
         }
 
     snapshot = create_snapshot(original, reason="pre-apply")
@@ -186,6 +215,7 @@ def apply_changes(
         "count": len(applied),
         "dry_run": False,
         "git_warnings": git_warnings,
+        "policy": policy,
     }
 
 

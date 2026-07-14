@@ -207,7 +207,7 @@ MENU_ITEMS: tuple[MenuItem, ...] = (
     MenuItem("7", "Workspace", "Sanitized copy for coding agents", "workspace", "Agent"),
     MenuItem("8", "Diff", "Review workspace changes + patches", "diff", "Agent"),
     MenuItem("9", "Apply", "Snapshot + apply after review", "apply", "Agent"),
-    MenuItem("q", "Exit", "Leave the menu", "exit", ""),
+    MenuItem("q", "Quit", "Leave the menu anytime", "exit", ""),
 )
 
 
@@ -230,6 +230,12 @@ def print_guide() -> None:
         print(f"     {c(why, DIM)}")
     print()
     print(c("Rule of thumb:", BOLD, YELLOW), "never point an agent at your real .git / .env.")
+    print(
+        c("Apply limits:", BOLD),
+        "max_changes / max_delete_ratio / protected_add live in .mug.toml [apply]; "
+        "menu only asks about deletions — it does not raise thresholds. "
+        "--force skips volume/git checks only, never protected paths.",
+    )
     print(c("Recovery:", BOLD), "mug snapshot · mug snapshots · mug restore <archive> <dir> --yes")
     print()
 
@@ -260,19 +266,67 @@ def print_cheatsheet() -> None:
     print()
     print(c("Tips", BOLD, YELLOW))
     print("  • JSON output: add --json to scan/pack/workspace/diff/apply/doctor")
+    print("  • Apply thresholds: .mug.toml [apply] max_changes / max_delete_ratio / protected_add")
+    print("  • --force: volume + git only — protected paths stay blocked")
     print("  • Quiet progress: MUG_NO_PROGRESS=1 or CI=1")
     print("  • Disable color: NO_COLOR=1")
     print()
 
 
-def prompt(message: str, default: str | None = None) -> str:
-    suffix = f" [{default}]" if default is not None else ""
+BACK_TOKENS = frozenset({"b", "back", "-"})
+QUIT_TOKENS = frozenset({"q", "quit", "exit"})
+
+
+class MenuNav(Exception):
+    """Raised from interactive prompts to leave a wizard step."""
+
+    def __init__(self, kind: str) -> None:
+        if kind not in {"back", "quit"}:
+            raise ValueError(f"unknown MenuNav kind: {kind}")
+        self.kind = kind
+        super().__init__(kind)
+
+
+def _nav_from_raw(raw: str) -> None:
+    lowered = raw.strip().lower()
+    if lowered in BACK_TOKENS:
+        raise MenuNav("back")
+    if lowered in QUIT_TOKENS:
+        raise MenuNav("quit")
+
+
+def prompt(
+    message: str,
+    default: str | None = None,
+    *,
+    allow_nav: bool = True,
+    required: bool = False,
+) -> str:
+    """Ask for text. With allow_nav: b/back = menu, q = quit, empty without default = back."""
+    if allow_nav:
+        if default is not None:
+            nav = " · b=back · q=quit"
+            suffix = f" [{default}]{nav}"
+        else:
+            suffix = " [b=back · q=quit]"
+    else:
+        suffix = f" [{default}]" if default is not None else ""
     try:
         raw = input(f"{c('?', ACCENT, BOLD)} {message}{suffix}: ").strip()
     except EOFError:
+        if allow_nav:
+            raise MenuNav("back") from None
         return default or ""
-    if not raw and default is not None:
+    if allow_nav:
+        if not raw:
+            if default is not None:
+                return default
+            raise MenuNav("back")
+        _nav_from_raw(raw)
+    elif not raw and default is not None:
         return default
+    if required and not raw:
+        raise MenuNav("back")
     return raw
 
 
@@ -288,12 +342,36 @@ def mug_prompt(default: str | None = None) -> str:
     return raw
 
 
-def confirm(message: str, default: bool = False) -> bool:
+def confirm(message: str, default: bool = False, *, allow_nav: bool = True) -> bool:
     hint = "Y/n" if default else "y/N"
-    answer = prompt(f"{message} ({hint})", "").lower()
+    nav = " · b=back" if allow_nav else ""
+    answer = prompt(f"{message} ({hint}{nav})", "", allow_nav=False).strip().lower()
+    if allow_nav:
+        if not answer:
+            return default
+        if answer in BACK_TOKENS:
+            raise MenuNav("back")
+        if answer in QUIT_TOKENS:
+            raise MenuNav("quit")
     if not answer:
         return default
     return answer in {"y", "yes"}
+
+
+def wait_return() -> None:
+    """Pause after an action so output is readable before redrawing the menu."""
+    print()
+    try:
+        raw = input(
+            f"{c('↵', ACCENT, BOLD)} {c('Back to menu', BOLD)} "
+            f"{c('(Enter) · q=quit', DIM)} "
+        ).strip().lower()
+    except EOFError:
+        return
+    if raw in QUIT_TOKENS:
+        raise MenuNav("quit")
+    if raw in BACK_TOKENS or raw == "" or raw in {"menu", "m"}:
+        return
 
 
 def render_menu() -> None:
@@ -319,12 +397,22 @@ def render_menu() -> None:
             f"{c(item.blurb, DIM)}"
         )
     print()
+    print(
+        f"  {c('nav', DIM)}  "
+        f"{c('1–9 / u', BOLD)}=run  ·  "
+        f"{c('Enter', BOLD)}/{c('b', BOLD)}=refresh  ·  "
+        f"{c('q', BOLD, RED)}/{c('0', BOLD, RED)}=quit  ·  "
+        f"in prompts: {c('b', BOLD)}=back"
+    )
+    print()
 
 
 def read_menu_choice() -> str | None:
-    raw = mug_prompt("1").strip().lower()
-    if raw in {"q", "quit", "exit", "0"}:
+    raw = mug_prompt().strip().lower()
+    if raw in QUIT_TOKENS or raw == "0":
         return "exit"
+    if raw in BACK_TOKENS or raw in {"menu", "m", ""}:
+        return "home"
     for item in MENU_ITEMS:
         if raw == item.key or raw == item.action or raw == item.title.lower():
             return item.action

@@ -203,10 +203,15 @@ class WorkspaceApplyTests(unittest.TestCase):
                     workspace, Config(), yes=False, allow_delete=False, force=False, dry_run=True
                 )
                 self.assertTrue(dry["dry_run"])
+                self.assertIn("policy", dry)
+                self.assertEqual(dry["policy"]["max_changes"], 200)
+                self.assertEqual(dry["policy"]["changes"], 1)
                 self.assertEqual((source / "hello.txt").read_text(encoding="utf-8"), "before\n")
                 result = apply_changes(workspace, Config(), yes=True, allow_delete=False, force=False)
                 self.assertEqual((source / "hello.txt").read_text(encoding="utf-8"), "after\n")
                 self.assertTrue(Path(str(result["snapshot"])).exists())
+                self.assertIn("policy", result)
+                self.assertIn("configure", result["policy"])
 
     def test_delete_is_blocked_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,6 +364,27 @@ class UiAndProgressTests(unittest.TestCase):
             self.assertEqual(read_menu_choice(), "exit")
         with patch("builtins.input", return_value="u"):
             self.assertEqual(read_menu_choice(), "update")
+        with patch("builtins.input", return_value=""):
+            self.assertEqual(read_menu_choice(), "home")
+        with patch("builtins.input", return_value="b"):
+            self.assertEqual(read_menu_choice(), "home")
+
+    def test_prompt_back_and_quit(self) -> None:
+        from mug.ui import MenuNav, confirm, prompt
+
+        with patch("builtins.input", return_value="b"):
+            with self.assertRaises(MenuNav) as raised:
+                prompt("Path")
+            self.assertEqual(raised.exception.kind, "back")
+        with patch("builtins.input", return_value="q"):
+            with self.assertRaises(MenuNav) as raised:
+                prompt("Path", ".")
+            self.assertEqual(raised.exception.kind, "quit")
+        with patch("builtins.input", return_value=""):
+            self.assertEqual(prompt("Path", "."), ".")
+        with patch("builtins.input", return_value="b"):
+            with self.assertRaises(MenuNav):
+                confirm("Sure?", False)
 
 
 class BaselineTests(unittest.TestCase):

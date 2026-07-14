@@ -22,6 +22,7 @@ from .ui import (
     GREEN,
     RED,
     YELLOW,
+    MenuNav,
     banner,
     c,
     confirm,
@@ -35,6 +36,7 @@ from .ui import (
     read_menu_choice,
     render_home,
     render_menu,
+    wait_return,
     warn,
 )
 from .utils import MugError, canonical_root
@@ -86,8 +88,16 @@ def parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("apply", help="Apply reviewed workspace changes to the original repository")
     apply.add_argument("workspace")
     apply.add_argument("--yes", action="store_true", help="Required confirmation")
-    apply.add_argument("--allow-delete", action="store_true")
-    apply.add_argument("--force", action="store_true", help="Override change/deletion thresholds and git dirty/HEAD checks")
+    apply.add_argument(
+        "--allow-delete",
+        action="store_true",
+        help="Permit deletions (still subject to max_delete_ratio unless --force)",
+    )
+    apply.add_argument(
+        "--force",
+        action="store_true",
+        help="Override volume/git checks only; never bypasses protected paths",
+    )
     apply.add_argument("--dry-run", action="store_true", help="Show the apply plan without writing")
     apply.add_argument("--json", action="store_true")
 
@@ -212,15 +222,29 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
 
     if command == "diff":
         workspace = Path(args.workspace)
-        original, changes, _ = compute_changes(
+        config = load_config(_workspace_original(workspace))
+        original, changes, manifest = compute_changes(
             workspace,
-            load_config(_workspace_original(workspace)),
+            config,
             include_patches=not args.no_patch,
         )
+        source_files = manifest.get("source_files", {})
+        deletes = sum(1 for change in changes if change.action == "delete")
+        protected = sum(1 for change in changes if change.action == "blocked" and "Protected" in change.reason)
+        denominator = max(1, len(source_files) if isinstance(source_files, dict) else 1)
+        delete_ratio = deletes / denominator
         payload = {
             "original": str(original),
             "changes": [change.to_dict() for change in changes],
             "count": len(changes),
+            "policy": {
+                "max_changes": config.max_changes,
+                "max_delete_ratio": config.max_delete_ratio,
+                "deletes": deletes,
+                "delete_ratio": round(delete_ratio, 4),
+                "protected_blocked": protected,
+                "configure": "edit [apply] in .mug.toml",
+            },
         }
         if args.json:
             print(json.dumps(payload, indent=2))
@@ -235,6 +259,14 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
                 if change.patch and not args.no_patch:
                     print(change.patch.rstrip())
                     print()
+            print()
+            print(
+                c("Apply policy", BOLD, CYAN)
+                + f": changes≤{config.max_changes}  "
+                + f"deletes {deletes} ({delete_ratio:.1%}) / max {config.max_delete_ratio:.1%}  "
+                + f"protected_blocked={protected}"
+            )
+            info("Thresholds live in .mug.toml [apply]; --force never bypasses protected paths.")
         return 1 if any(change.action == "blocked" for change in changes) else 0
 
     if command == "apply":
@@ -388,6 +420,12 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         "network_default": config.sandbox_network,
         "fail_on_unscanned": config.fail_on_unscanned,
         "immutable_exclude_count": len(IMMUTABLE_EXCLUDES),
+        "apply_policy": {
+            "max_changes": config.max_changes,
+            "max_delete_ratio": config.max_delete_ratio,
+            "protected_patterns": len(config.protected),
+            "configure": "[apply] in .mug.toml — protected_add only adds; --force never bypasses protected",
+        },
         "warnings": warnings,
         "posture": "hardened" if not warnings and any(engines.values()) else "review",
         "install_hint": (
@@ -408,6 +446,14 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
             elif key == "posture":
                 color = GREEN if value == "hardened" else YELLOW
                 print(f"{c('posture', BOLD)}: {c(str(value), color, BOLD)}")
+            elif key == "apply_policy" and isinstance(value, dict):
+                print(
+                    f"{c('apply_policy', BOLD)}: "
+                    f"max_changes={value['max_changes']}  "
+                    f"max_delete_ratio={value['max_delete_ratio']:.1%}  "
+                    f"protected={value['protected_patterns']}"
+                )
+                info(str(value["configure"]))
             else:
                 print(f"{c(str(key), DIM)}: {value}")
         print()
@@ -423,26 +469,71 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
 def run_menu() -> int:
     render_home(__version__)
     while True:
-        render_menu()
-        action = read_menu_choice()
-        print()
-        if action is None:
-            warn("Unknown choice. Pick a number from the menu (or q to exit).")
-            continue
-        if action == "exit":
+        try:
+            render_menu()
+            action = read_menu_choice()
+            print()
+            if action is None:
+                warn("Unknown choice. Pick a number from the menu (or q to quit).")
+                continue
+            if action == "home":
+                render_home(__version__)
+                continue
+            if action == "exit":
+                ok("Bye. Stay fail-closed.")
+                return 0
+            try:
+                code = _menu_action(action)
+            except MenuNav as nav:
+                if nav.kind == "quit":
+                    ok("Bye. Stay fail-closed.")
+                    return 0
+                info("Back to menu.")
+                print()
+                render_home(__version__)
+                continue
+            except MugError as exc:
+                err(str(exc))
+                try:
+                    wait_return()
+                except MenuNav as nav:
+                    if nav.kind == "quit":
+                        ok("Bye. Stay fail-closed.")
+                        return 0
+                print()
+                render_home(__version__)
+                continue
+            if code is None:
+                try:
+                    wait_return()
+                except MenuNav as nav:
+                    if nav.kind == "quit":
+                        ok("Bye. Stay fail-closed.")
+                        return 0
+                print()
+                render_home(__version__)
+                continue
+            if code not in {0, 1}:
+                return code
+            try:
+                wait_return()
+            except MenuNav as nav:
+                if nav.kind == "quit":
+                    ok("Bye. Stay fail-closed.")
+                    return 0
+            print()
+            render_home(__version__)
+        except KeyboardInterrupt:
+            print()
             ok("Bye. Stay fail-closed.")
             return 0
-        try:
-            code = _menu_action(action)
-        except MugError as exc:
-            err(str(exc))
+        except MenuNav as nav:
+            if nav.kind == "quit":
+                ok("Bye. Stay fail-closed.")
+                return 0
+            info("Back to menu.")
             print()
-            continue
-        if code is None:
-            continue
-        if code not in {0, 1}:
-            return code
-        print()
+            render_home(__version__)
 
 
 def _menu_action(action: str) -> int | None:
@@ -458,11 +549,16 @@ def _menu_action(action: str) -> int | None:
     if action == "init":
         return dispatch(SimpleNamespace(command="init", path=".", force=False))
     if action == "scan":
+        info("Type b anytime to return to the menu.")
         path = prompt("Project path", ".")
         return dispatch(SimpleNamespace(command="scan", path=path, json=False, update_baseline=False))
     if action == "update":
+        if not confirm("Update mug from GitHub now?", True):
+            info("Cancelled.")
+            raise MenuNav("back")
         return dispatch(SimpleNamespace(command="update", ref=None, check=False, json=False))
     if action == "pack":
+        info("Type b anytime to return to the menu.")
         path = prompt("Project path", ".")
         default_out = f"{Path(path).resolve().name}-sanitized.zip"
         output = prompt("ZIP output path", default_out)
@@ -477,6 +573,7 @@ def _menu_action(action: str) -> int | None:
             )
         )
     if action == "workspace":
+        info("Type b anytime to return to the menu.")
         path = prompt("Project path", ".")
         root = Path(path).expanduser().resolve()
         default_out = str(root.parent / f"{root.name}-ai-workspace")
@@ -492,29 +589,60 @@ def _menu_action(action: str) -> int | None:
             )
         )
     if action == "diff":
-        workspace = prompt("Workspace path")
-        if not workspace:
-            warn("Workspace path required.")
-            return None
+        info("Type b anytime to return to the menu.")
+        workspace = prompt("Workspace path", required=True)
         return dispatch(SimpleNamespace(command="diff", workspace=workspace, json=False, no_patch=False))
     if action == "apply":
-        workspace = prompt("Workspace path")
-        if not workspace:
-            warn("Workspace path required.")
-            return None
+        info("Type b anytime to return to the menu.")
+        workspace = prompt("Workspace path", required=True)
+        try:
+            original = _workspace_original(Path(workspace))
+            config = load_config(original)
+            _, changes, manifest = compute_changes(Path(workspace), config, include_patches=False)
+        except MugError as exc:
+            err(str(exc))
+            raise MenuNav("back") from exc
+        deletes = [change for change in changes if change.action == "delete"]
+        actionable = [change for change in changes if change.action != "blocked"]
+        source_files = manifest.get("source_files", {})
+        denominator = max(1, len(source_files) if isinstance(source_files, dict) else 1)
+        delete_ratio = len(deletes) / denominator
+        print()
+        info(
+            f"Apply policy for this repo: max_changes={config.max_changes}, "
+            f"max_delete_ratio={config.max_delete_ratio:.1%} "
+            f"(edit [apply] in .mug.toml — menu does not change these)"
+        )
+        info(
+            f"This run: {len(actionable)} change(s), {len(deletes)} delete(s) "
+            f"({delete_ratio:.1%}). Protected paths cannot be forced."
+        )
         dry = confirm("Dry-run only (recommended first)?", True)
         yes = True if dry else confirm("Apply for real? This writes the original repo.", False)
         if not dry and not yes:
             info("Cancelled.")
-            return None
-        allow_delete = False if dry else confirm("Allow deletions?", False)
+            raise MenuNav("back")
+        allow_delete = False
+        if deletes and not dry:
+            allow_delete = confirm(
+                f"Allow {len(deletes)} deletion(s)? (limit {config.max_delete_ratio:.1%}; does not raise the limit)",
+                False,
+            )
+        need_force = len(actionable) > config.max_changes or delete_ratio > config.max_delete_ratio
+        force = False
+        if need_force and not dry:
+            warn("This change set exceeds volume thresholds (max_changes / max_delete_ratio).")
+            force = confirm("Pass --force for volume/git checks only? (never bypasses protected paths)", False)
+            if not force:
+                info("Cancelled. Raise limits in .mug.toml or shrink the change set.")
+                raise MenuNav("back")
         return dispatch(
             SimpleNamespace(
                 command="apply",
                 workspace=workspace,
                 yes=yes,
                 allow_delete=allow_delete,
-                force=False,
+                force=force,
                 dry_run=dry,
                 json=False,
             )
@@ -587,5 +715,13 @@ def _print_result(result: dict[str, object], as_json: bool) -> None:
             print(f"applied: {len(value)}")
             for change in value:
                 print(f"  {change['action'].upper():8} {change['path']}")
+        elif key == "policy" and isinstance(value, dict):
+            print(
+                f"policy: changes={value.get('changes')}/{value.get('max_changes')}  "
+                f"deletes={value.get('deletes')} ({value.get('delete_ratio')})  "
+                f"protected_blocked={value.get('protected_blocked')}"
+            )
+            if value.get("configure"):
+                info(str(value["configure"]))
         else:
             print(f"{key}: {value}")
