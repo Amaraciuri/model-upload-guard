@@ -431,7 +431,7 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         "install_hint": (
             "pip install model-upload-guard"
             if pypi_available
-            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 bash"
+            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.2/install.sh | MUG_REF=v0.3.2 bash"
         ),
     }
     if as_json:

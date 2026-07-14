@@ -38,14 +38,14 @@ AI coding tools are useful — and dangerous by default: they can upload `.env` 
 **Verified installer (recommended):** downloads the GitHub Release `source.zip` and checks SHA256.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.2/install.sh | MUG_REF=v0.3.2 bash
 mug --version
 ```
 
 If the release assets are still propagating, allow an unverified archive of that tag (audit the tag first):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 MUG_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.2/install.sh | MUG_REF=v0.3.2 MUG_ALLOW_UNVERIFIED=1 bash
 ```
 
 **From a local clone:**
@@ -59,8 +59,8 @@ cd model-upload-guard
 **Manual verified install:**
 
 ```bash
-curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.1/source.zip
-curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.1/SHA256SUMS.txt
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.2/source.zip
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.2/SHA256SUMS.txt
 # macOS: shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 # Linux: sha256sum -c SHA256SUMS.txt --ignore-missing
 pip install source.zip

@@ -81,7 +81,7 @@ def check_update() -> dict[str, object]:
 
 
 def self_update(ref: str | None = None) -> dict[str, object]:
-    target = ref or latest_tag() or "v0.3.1"
+    target = ref or latest_tag() or "v0.3.2"
     # Prefer checksum-backed release assets when available.
     source_url = f"https://github.com/{_repo()}/releases/download/{target}/source.zip"
     archive_url = f"https://github.com/{_repo()}/archive/{target}.zip"

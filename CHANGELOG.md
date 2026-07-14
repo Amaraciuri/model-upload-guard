@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 - 2026-07-15
+
+Apply policy visibility and menu navigation.
+
+- **Apply policy surfaced**: `mug diff`, `mug apply` (incl. `--json`), and `mug doctor` show `max_changes` / `max_delete_ratio` / protected counts; errors point at `.mug.toml [apply]`.
+- Interactive apply previews thresholds and this-run delete ratio before confirm; `--force` help text clarifies volume/git only (never protected paths).
+- **Menu UX**: `b`/`back` returns to menu from any prompt; `q` quits; after each action, Enter returns to the home screen; Ctrl-C exits cleanly.
+- Guide / cheat sheet document apply limits and force semantics.
+
 ## 0.3.1 - 2026-07-14
 
 Make installs trustworthy and apply git-aware.
