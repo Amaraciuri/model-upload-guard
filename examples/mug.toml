@@ -25,6 +25,7 @@ protected_remove = []
 
 [sandbox]
 engine = "auto"
+# profile = "python-dev"  # default | agent-shell | python-dev | node-dev
 image = "python:3.12-alpine"
 network = false
 memory = "2g"
@@ -32,3 +33,6 @@ cpus = "2"
 pids_limit = 256
 user = "65534:65534"
 read_only_root = true
+# Writable tmpfs HOME so agent CLIs (config/cache) work as non-root.
+home_tmpfs = true
+home_size = "512m"

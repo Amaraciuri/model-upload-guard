@@ -8,7 +8,6 @@ from typing import Any
 
 from .utils import MugError, normalize_rel
 
-
 # Always enforced. Cannot be removed by project or user config.
 IMMUTABLE_EXCLUDES = [
     ".git",
@@ -18,6 +17,7 @@ IMMUTABLE_EXCLUDES = [
     ".mug.toml",
     ".mug-id",
     ".mug-manifest.json",
+    ".mug-baseline.json",
     ".env",
     ".env.*",
     "*.pem",
@@ -121,6 +121,7 @@ IMMUTABLE_PROTECTED = [
     ".git",
     ".git/**",
     ".mug.toml",
+    ".mug-baseline.json",
     ".env",
     ".env.*",
     "*.pem",
@@ -155,6 +156,30 @@ IMMUTABLE_PROTECTED = [
 
 PROTECTED_PATTERNS = list(IMMUTABLE_PROTECTED)
 
+# Preset sandbox stacks. Explicit [sandbox] keys override profile defaults.
+SANDBOX_PROFILES: dict[str, dict[str, object]] = {
+    "default": {},
+    "agent-shell": {
+        "image": "debian:bookworm-slim",
+        "memory": "2g",
+        "cpus": "2",
+        "home_tmpfs": True,
+        "home_size": "1g",
+    },
+    "python-dev": {
+        "image": "python:3.12-slim",
+        "memory": "2g",
+        "home_tmpfs": True,
+        "home_size": "512m",
+    },
+    "node-dev": {
+        "image": "node:22-bookworm-slim",
+        "memory": "2g",
+        "home_tmpfs": True,
+        "home_size": "1g",
+    },
+}
+
 DEFAULT_CONFIG_TEXT = """# Model Upload Guard configuration
 # Security defaults are always enforced. Lists below only ADD patterns.
 # Use exclude_remove / protected_remove only with allow_weaken_defaults = true.
@@ -180,6 +205,7 @@ protected_remove = []
 
 [sandbox]
 engine = "auto"
+# profile = "default"   # default | agent-shell | python-dev | node-dev
 image = "python:3.12-alpine"
 network = false
 memory = "2g"
@@ -187,6 +213,9 @@ cpus = "2"
 pids_limit = 256
 user = "65534:65534"
 read_only_root = true
+# Writable tmpfs HOME so agent CLIs (config/cache) work as non-root.
+home_tmpfs = true
+home_size = "512m"
 """
 
 
@@ -210,6 +239,20 @@ class Config:
     sandbox_pids_limit: int = 256
     sandbox_user: str = "65534:65534"
     sandbox_read_only_root: bool = True
+    sandbox_home_tmpfs: bool = True
+    sandbox_home_size: str = "512m"
+    sandbox_profile: str = "default"
+
+
+def _apply_sandbox_profile(sandbox: dict[str, Any]) -> dict[str, Any]:
+    profile_name = str(sandbox.get("profile", "default") or "default")
+    preset = SANDBOX_PROFILES.get(profile_name)
+    if preset is None:
+        choices = ", ".join(sorted(SANDBOX_PROFILES))
+        raise MugError(f"sandbox.profile must be one of: {choices}")
+    if profile_name == "default":
+        return sandbox
+    return {**preset, **sandbox}
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -292,7 +335,7 @@ def load_config(root: Path) -> Config:
     scan = _section(data, "scan")
     export = _section(data, "export")
     apply = _section(data, "apply")
-    sandbox = _section(data, "sandbox")
+    sandbox = _apply_sandbox_profile(_section(data, "sandbox"))
 
     allow_weaken = bool(export.get("allow_weaken_defaults", False))
     legacy_exclude = export.get("exclude")
@@ -336,6 +379,9 @@ def load_config(root: Path) -> Config:
         sandbox_pids_limit=int(sandbox.get("pids_limit", 256)),
         sandbox_user=str(sandbox.get("user", "65534:65534")),
         sandbox_read_only_root=bool(sandbox.get("read_only_root", True)),
+        sandbox_home_tmpfs=bool(sandbox.get("home_tmpfs", True)),
+        sandbox_home_size=str(sandbox.get("home_size", "512m")),
+        sandbox_profile=str(sandbox.get("profile", "default") or "default"),
     )
     if config.fail_on not in {"low", "medium", "high", "critical"}:
         raise MugError("scan.fail_on must be low, medium, high, or critical")

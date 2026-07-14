@@ -1,52 +1,44 @@
-# Publishing to GitHub
+# Publishing
 
-The release package can be published under the suggested repository name:
+Repository: `Amaraciuri/model-upload-guard`
 
-```text
-Amaraciuri/model-upload-guard
-```
+## Release (tag → GitHub + PyPI)
 
-## Fastest method with GitHub CLI
-
-Install and authenticate GitHub CLI, then run from this repository:
+1. Bump `version` in `pyproject.toml` and `mug/__init__.py`.
+2. Update `CHANGELOG.md`.
+3. Commit, tag, push:
 
 ```bash
-gh auth login
-gh repo create Amaraciuri/model-upload-guard \
-  --public \
-  --description "Model-agnostic safety boundary for sharing code with AI agents" \
-  --source . \
-  --remote origin \
-  --push
-
-git push origin v0.2.0
+git tag -a v0.3.0 -m "Model Upload Guard v0.3.0"
+git push origin main v0.3.0
 ```
 
-Create the release:
+The `release` workflow (`.github/workflows/release.yml`) on tag push:
+
+- builds sdist + wheel;
+- writes `SHA256SUMS.txt`;
+- creates a GitHub Release with artifacts;
+- publishes to PyPI via Trusted Publishing (when configured).
+
+## PyPI Trusted Publishing (one-time)
+
+1. Create the project at https://pypi.org/manage/projects/ (name: `model-upload-guard`).
+2. Add a Trusted Publisher: GitHub → `Amaraciuri/model-upload-guard` → workflow `release.yml` → environment `pypi` (optional).
+3. Push a tag; the workflow publishes automatically.
+
+Until PyPI is configured, the publish step is `continue-on-error: true` so GitHub releases still succeed.
+
+## Manual PyPI publish (fallback)
 
 ```bash
-gh release create v0.2.0 \
-  --title "Model Upload Guard v0.2.0" \
-  --notes-file CHANGELOG.md
+python -m pip install build twine
+python -m build
+twine upload dist/*
 ```
 
-## GitHub website method
-
-1. Create a new empty public repository named `model-upload-guard` under `Amaraciuri`.
-2. Do not initialize it with a README, license, or `.gitignore` because they already exist here.
-3. Run:
-
-```bash
-git remote add origin git@github.com:Amaraciuri/model-upload-guard.git
-git push -u origin main
-git push origin v0.2.0
-```
-
-## Before announcing it publicly
+## Before announcing publicly
 
 - Enable GitHub secret scanning and push protection where available.
-- Enable branch protection for `main`.
-- Require the test workflow to pass.
+- Enable branch protection for `main` (require `test` workflow).
 - Enable private vulnerability reporting.
-- Publish release checksums and, in a later release, signed artifacts.
-- Replace the `main` installer example with a pinned release tag in announcements.
+- Pin installer examples to a release tag, not `main`.

@@ -10,9 +10,10 @@ from types import SimpleNamespace
 
 from . import __version__
 from .apply import apply_changes, compute_changes
+from .baseline import BASELINE_NAME, load_baseline, write_baseline
 from .config import DEFAULT_CONFIG_TEXT, IMMUTABLE_EXCLUDES, load_config
 from .sandbox import inspect_command, run_sandbox
-from .scanner import blocks_export, scan_tree
+from .scanner import NON_BLOCKING_RULES, Finding, blocks_export, scan_tree
 from .snapshot import create_snapshot, list_snapshots, restore_snapshot
 from .ui import (
     BOLD,
@@ -59,6 +60,11 @@ def parser() -> argparse.ArgumentParser:
     scan = sub.add_parser("scan", help="Find sensitive files and secret-like content")
     scan.add_argument("path", nargs="?", default=".")
     scan.add_argument("--json", action="store_true")
+    scan.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help=f"Accept the current findings into {BASELINE_NAME} after human review",
+    )
 
     pack = sub.add_parser("pack", help="Create a sanitized ZIP safe to upload for review")
     pack.add_argument("path", nargs="?", default=".")
@@ -113,6 +119,11 @@ def parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="Check local prerequisites and safety posture")
     doctor.add_argument("path", nargs="?", default=".")
     doctor.add_argument("--json", action="store_true")
+
+    update = sub.add_parser("update", help="Update mug in place from GitHub")
+    update.add_argument("--ref", help="Tag or branch to install (default: latest release)")
+    update.add_argument("--check", action="store_true", help="Only check whether a newer version exists")
+    update.add_argument("--json", action="store_true")
     return root
 
 
@@ -134,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-def dispatch(args: argparse.Namespace) -> int:
+def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
     command = args.command
     if command in {"menu"}:
         return run_menu()
@@ -158,9 +169,15 @@ def dispatch(args: argparse.Namespace) -> int:
         config = load_config(root)
         quiet = bool(getattr(args, "json", False))
         bar, progress = make_progress("Scanning", quiet=quiet)
-        findings = scan_tree(root, config, on_progress=progress)
+        findings = scan_tree(root, config, on_progress=progress, baseline=load_baseline(root))
         if bar is not None:
             bar.finish(c(f"✓ scanned {root.name}", GREEN) if not quiet else "")
+        if getattr(args, "update_baseline", False):
+            accepted = [item for item in findings if item.rule not in NON_BLOCKING_RULES]
+            baseline_path, count = write_baseline(root, accepted)
+            if not quiet:
+                ok(f"Baseline written: {baseline_path} ({count} finding(s) accepted)")
+                warn("Baselined findings no longer block export. Review them before committing the baseline.")
         if args.json:
             print(json.dumps([item.to_dict() for item in findings], indent=2))
         else:
@@ -291,10 +308,33 @@ def dispatch(args: argparse.Namespace) -> int:
     if command == "doctor":
         return _cmd_doctor(getattr(args, "path", "."), getattr(args, "json", False))
 
+    if command == "update":
+        from .update import check_update, self_update
+
+        if args.check:
+            payload = check_update()
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            elif payload["update_available"]:
+                info(f"Update available: {payload['current']} → {payload['latest']}")
+                info("Run: mug update")
+            else:
+                ok(f"mug {payload['current']} is up to date (latest: {payload['latest']})")
+            return 0 if not payload["update_available"] else 1
+        result = self_update(getattr(args, "ref", None))
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            ok(f"Updated {result['previous']} → {result['installed']} (ref {result['ref']})")
+            info("Restart any running mug session to use the new version.")
+        return 0
+
     raise MugError(f"Unsupported command: {command}")
 
 
 def _cmd_doctor(path: str, as_json: bool) -> int:
+    from .update import check_update
+
     root = canonical_root(path)
     config = load_config(root)
     engines = {name: bool(shutil.which(name)) for name in ("podman", "docker")}
@@ -305,12 +345,24 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         warnings.append("allow_weaken_defaults=true can remove non-immutable export excludes")
     if config.sandbox_user in {"", "0:0", "root", "0"}:
         warnings.append("sandbox.user runs as root inside the container")
+    update_info: dict[str, object] = {"current": __version__, "latest": __version__, "update_available": False}
+    try:
+        update_info = check_update()
+        if update_info.get("update_available"):
+            warnings.append(
+                f"Update available: {update_info['current']} → {update_info['latest']}. Run: mug update"
+            )
+    except MugError:
+        pass
     payload = {
         "version": __version__,
+        "latest_version": update_info.get("latest"),
+        "update_available": update_info.get("update_available"),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "root": str(root),
         "config": str(root / ".mug.toml") if (root / ".mug.toml").exists() else "defaults",
+        "sandbox_profile": config.sandbox_profile,
         "sandbox_engines": engines,
         "safe_sandbox_available": any(engines.values()),
         "network_default": config.sandbox_network,
@@ -324,10 +376,10 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
     else:
         banner(__version__)
         for key, value in payload.items():
-            if key == "warnings":
+            if key == "warnings" and isinstance(value, list):
                 print(f"{c('warnings', BOLD)}: {len(value)}")
                 for warning in value:
-                    warn(warning)
+                    warn(str(warning))
             elif key == "posture":
                 color = GREEN if value == "hardened" else YELLOW
                 print(f"{c('posture', BOLD)}: {c(str(value), color, BOLD)}")
@@ -379,7 +431,9 @@ def _menu_action(action: str) -> int | None:
         return dispatch(SimpleNamespace(command="init", path=".", force=False))
     if action == "scan":
         path = prompt("Project path", ".")
-        return dispatch(SimpleNamespace(command="scan", path=path, json=False))
+        return dispatch(SimpleNamespace(command="scan", path=path, json=False, update_baseline=False))
+    if action == "update":
+        return dispatch(SimpleNamespace(command="update", ref=None, check=False, json=False))
     if action == "pack":
         path = prompt("Project path", ".")
         default_out = f"{Path(path).resolve().name}-sanitized.zip"
@@ -447,17 +501,23 @@ def _workspace_original(workspace: Path) -> Path:
     return original
 
 
-def _print_findings(findings: list[object]) -> None:
+def _print_findings(findings: list[Finding]) -> None:
     if not findings:
         ok("No findings.")
         return
-    for item in findings:
+    baselined = [item for item in findings if item.baselined]
+    active = [item for item in findings if not item.baselined]
+    for item in active:
         location = f"{item.path}:{item.line}" if item.line else item.path
         sev = item.severity.upper()
         color = RED if item.severity in {"high", "critical"} else YELLOW
         print(f"{c(f'{sev:8}', color, BOLD)} {location} [{item.rule}] {item.message}")
         if item.excerpt:
             print(f"         {item.excerpt}")
+    if baselined:
+        print(c(f"{len(baselined)} baselined finding(s) accepted via .mug-baseline.json (not blocking)", DIM))
+    if not active:
+        ok("No blocking findings.")
     by_rule: dict[str, int] = {}
     by_severity: dict[str, int] = {}
     for item in findings:
@@ -478,6 +538,14 @@ def _print_findings(findings: list[object]) -> None:
         print(
             "  tip: high-entropy → review redacted excerpts; lockfile/checksum noise is filtered by default."
         )
+    if by_rule.get("gitignored-file"):
+        print(
+            "  tip: gitignored-file → gitignored files are often local-only config; "
+            "add them to export.exclude_add or accept with --update-baseline."
+        )
+    print(
+        "  tip: reviewed false positives? accept them individually: mug scan --update-baseline"
+    )
 
 
 def _print_result(result: dict[str, object], as_json: bool) -> None:

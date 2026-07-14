@@ -1,349 +1,244 @@
-# Model Upload Guard (`mug`)
+<div align="center">
 
-**A model-agnostic safety boundary for sharing source code with AI tools and applying their changes without handing them your real repository.**
-
-`mug` does not try to make an AI model trustworthy. It reduces what the model can see, limits where an agent can write, blocks dangerous change sets, and creates a recovery point before anything touches the original project.
-
-> Status: security-focused alpha (**v0.2.2** fail-closed). Free/MIT. Use defense in depth, keep source control enabled, and review every diff.
-
-## Why this exists
-
-AI coding tools can be useful, but a prompt, tool bug, compromised dependency, or mistaken command can:
-
-- upload `.env` files, private keys, cloud credentials, databases, or Git history;
-- inspect unrelated files on the computer;
-- delete or overwrite large parts of a project;
-- rewrite Git history or destroy uncommitted work;
-- return a modified archive containing unexpected files.
-
-Command hooks such as `destructive_command_guard` are valuable because they intercept known dangerous commands. `mug` addresses a different layer: **what leaves the machine, where the agent works, and how its changes return to the original repository**.
-
-## Core workflow
-
-```text
-REAL REPOSITORY
-      │
-      ├── mug scan       → detect sensitive names and secret-like content
-      ├── mug pack       → sanitized ZIP for chat/browser upload
-      └── mug workspace  → sanitized copy for coding agents
-                               │
-                               └── mug run → Docker/Podman, no network by default
-                                                   │
-                                                   ▼
-                                           mug diff / mug apply
-                                      review + thresholds + snapshot
-                                                   │
-                                                   ▼
-                                           REAL REPOSITORY
+```
+ ███╗   ███╗██╗   ██╗ ██████╗
+ ████╗ ████║██║   ██║██╔════╝
+ ██╔████╔██║██║   ██║██║  ███╗
+ ██║╚██╔╝██║██║   ██║██║   ██║
+ ██║ ╚═╝ ██║╚██████╔╝╚██████╔╝
+ ╚═╝     ╚═╝ ╚═════╝  ╚═════╝
 ```
 
-## Installation
+**The safety boundary for sharing code with AI.**
+
+`git` protects history. `mug` protects **what leaves your machine**, **where the agent works**, and **what comes back**.
+
+[![test](https://github.com/Amaraciuri/model-upload-guard/actions/workflows/test.yml/badge.svg)](https://github.com/Amaraciuri/model-upload-guard/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11+-3776ab?logo=python&logoColor=white)](./pyproject.toml)
+[![PyPI](https://img.shields.io/pypi/v/model-upload-guard?color=3776ab&label=pypi)](https://pypi.org/project/model-upload-guard/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-27a644.svg)](./CONTRIBUTING.md)
+
+[Quickstart](#quickstart) · [What it answers](#the-questions-your-workflow-cant-answer-today) ·
+[How it works](#how-it-works) · [Compare](#how-it-compares) · [Commands](#commands) ·
+[Security](./SECURITY.md) · [Changelog](./CHANGELOG.md)
+
+</div>
+
+---
+
+AI coding tools are useful — and dangerous by default: they can upload `.env` files, read your whole home directory, rewrite the repo, or return a ZIP full of surprises.
+
+**mug** is a model-agnostic, fail-closed boundary. It **sanitizes** what you share, **isolates** where agents work, **blocks** bad change sets, and **snapshots** before anything touches your real repository. No trust in the model required.
+
+> Free & MIT. Stdlib-only runtime. Security-focused alpha — review every diff.
+
+## Quickstart
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | bash
+pip install model-upload-guard   # or: pipx install model-upload-guard
+cd your-project
+mug                              # interactive menu — or follow below
 ```
 
-Pin a release tag (recommended):
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | MUG_REF=v0.2.2 bash
-```
-
-If `raw.githubusercontent.com/.../v0.2.2/install.sh` returns 404 right after a release, use the command above (`main` script + `MUG_REF` tag). Tag URLs usually catch up within a few minutes.
-
-From a local clone:
-
-```bash
-git clone https://github.com/Amaraciuri/model-upload-guard.git
-cd model-upload-guard
-./install.sh
-```
-
-Requirements:
-
-- Python 3.11+
-- Linux, macOS, or Windows through WSL for the shell installer
-- Docker or Podman only for `mug run`
-
-The installer creates a dedicated virtual environment under `~/.local/share/model-upload-guard` and links `mug` into `~/.local/bin`. Re-running it upgrades in place (`pip install --upgrade`). No third-party runtime packages are required.
-
-## Updating
-
-Re-run the installer. It upgrades the existing venv.
-
-**Latest release (pinned):**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | MUG_REF=v0.2.2 bash
-mug --version
-mug doctor
-```
-
-**Always tracking `main`:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | bash
-```
-
-**From a local clone:**
-
-```bash
-cd model-upload-guard
-git pull
-./install.sh
-```
-
-Local recovery snapshots and workspace registry under `~/.local/state/model-upload-guard` are kept. `uninstall.sh` removes only the tool install, not those snapshots.
-
-## What's new in 0.2.x
-
-**Security (0.2.0)** — fail-closed defaults: immutable exclude/protected patterns, sealed workspace manifests, unscanned binary/large-file refusal, unified `mug diff` patches, `mug apply --dry-run`, dual-gated sandbox network, non-root sandbox user.
-
-**Scanner (0.2.1)** — fewer false positives on lockfiles/checksums, clearer large-file tips, broader default excludes (IDE junk, audio, jars, …).
-
-**Terminal UX (0.2.2)**
-
-- `mug` / `mug menu` — interactive menu and quick start
-- `mug guide` — print the safe workflow
-- Progress bars on `scan` / `pack` / `workspace` (TTY only; disable with `MUG_NO_PROGRESS=1` or `CI=1`)
-- Colorized findings/summary when the terminal supports it (`NO_COLOR=1` to disable)
-- `--json` stays machine-readable (no progress noise)
-
-## Five-minute usage
-
-Inside a project:
-
-```bash
-mug                 # interactive menu + quick start
-# or:
 mug init
-mug scan            # progress bar on TTY
-mug pack . -o project-for-ai.zip
+mug scan
+mug pack . -o safe-for-ai.zip    # upload only this ZIP, never the raw repo
 ```
 
-Prefer commands? `mug guide` prints the workflow; `mug --help` lists every subcommand.
-The ZIP excludes `.git`, `.env*`, private keys, credential files, local databases, dependencies, build output, and other configured paths. Export stops when secret-like content is detected inside otherwise allowed source files.
-
-For an AI coding agent:
+For a coding agent (Claude Code, Codex, Cursor, Gemini CLI, …):
 
 ```bash
 mug workspace . -o ../project-ai-workspace
-mug run ../project-ai-workspace -- sh
-```
-
-The container receives only the sanitized workspace. Defaults include:
-
-- no network;
-- read-only container root filesystem;
-- only the sanitized workspace mounted writable;
-- all Linux capabilities dropped;
-- `no-new-privileges`;
-- CPU, memory, process, and temporary-directory limits;
-- no unsafe fallback to direct host execution.
-
-After the agent finishes:
-
-```bash
+mug run ../project-ai-workspace -- your-agent
 mug diff ../project-ai-workspace
 mug apply ../project-ai-workspace --dry-run
 mug apply ../project-ai-workspace --yes
 ```
 
-Deletion is refused by default. To accept reviewed deletions:
+That's the whole loop: **scan → export or workspace → review → apply**.
+
+## What you need
+
+| Piece | Needed for | Without it |
+|---|---|---|
+| **Python ≥ 3.11** | everything | (required) |
+| **pip / pipx** or **curl installer** | install & update | clone + `./install.sh` |
+| **Docker or Podman** | `mug run` (sandbox) | pack, workspace, scan, diff, apply still work |
+| **git** | gitignored-export warnings | scan still works; no `gitignored-file` hints |
+
+Install options:
 
 ```bash
-mug apply ../project-ai-workspace --allow-delete --yes
+pip install model-upload-guard                    # PyPI
+pipx install model-upload-guard                   # isolated CLI
+curl -fsSL .../install.sh | MUG_REF=v0.3.0 bash  # shell installer
 ```
 
-Before applying, `mug` creates a private local recovery snapshot. Protected files such as `.git`, `.env`, keys, and credentials cannot be introduced or modified through the workspace.
+Update:
+
+```bash
+mug update --check
+mug update
+# or: pip install --upgrade model-upload-guard
+```
+
+## The questions your workflow can't answer today
+
+- *Am I about to upload secrets in this ZIP?*
+- *Is the agent working on a copy — or my real `.git`?*
+- *If it deletes 40 files, will I notice before it lands?*
+- *Can someone tamper with the workspace manifest and trick `apply`?*
+- *If apply fails halfway, is my repo left broken?*
+
+mug answers all five, by design. Three answers are the core product:
+
+### ① Export gate: nothing leaves dirty
+
+`mug scan` finds sensitive filenames, provider tokens, high-entropy blobs, and unscanned binaries. **`mug pack` and `mug workspace` stop** unless you explicitly override. Review first, then ship a sanitized artifact.
+
+```
+HIGH     config.js:4 [github-token] GitHub token
+         const token = '[REDACTED]';
+Summary: 1 finding(s)
+  tip: reviewed false positives? mug scan --update-baseline
+```
+
+### ② Isolation: agents don't touch the real repo
+
+The agent gets a **sanitized workspace** — no `.git`, no `.env`, no keys. Optional **`mug run`** adds Docker/Podman: no network by default, read-only root, non-root user, writable ephemeral `HOME` for agent CLIs. Missing Docker? mug **refuses** a host fallback.
+
+### ③ Reviewed return path: diff, thresholds, snapshot, rollback
+
+Changes flow back through **`mug diff`** (unified patches), then **`mug apply --dry-run`**, then **`mug apply --yes`**. Deletions need `--allow-delete`. Protected paths (`.env`, keys, `.git`) cannot be introduced. A **local snapshot** is taken before every apply; mid-apply failures **roll back automatically**.
+
+## Per-finding baseline (not `--allow-findings`)
+
+False positive on one test fixture? Don't disable the whole scanner.
+
+```bash
+mug scan                              # review
+mug scan --update-baseline            # accept specific findings only
+git add .mug-baseline.json            # share with your team
+mug pack . -o safe.zip                # export proceeds; baseline stays local
+```
+
+Fingerprints bind **rule + path + content**. Change the content → blocking returns. The baseline is **never exported** and **cannot be modified through a workspace**.
+
+## How it works
+
+mug never asks you to trust the model. It shrinks blast radius at three layers:
+
+```
+  YOUR REAL REPOSITORY                          AI (browser or agent)
+  (.git, .env, keys, history)                         │
+         │                                            │
+         │  mug scan ──► findings + baseline           │
+         │  mug pack ──► sanitized ZIP ──────────────┼──► chat upload
+         │  mug workspace ──► sanitized copy           │
+         │         │                                   │
+         │         └── mug run (Docker/Podman) ────────┼──► agent works here
+         │                    no network default       │         │
+         │                    sealed manifest           │         │
+         │                         │                   │         │
+         │              mug diff ◄─┴───────────────────┘         │
+         │              mug apply --dry-run                       │
+         │              mug apply --yes (+ snapshot)               │
+         ▼                                                        │
+  REAL REPOSITORY ◄── only reviewed changes ──────────────────────┘
+```
+
+Principles that don't bend:
+
+1. **Fail-closed config** — short `exclude` lists can't drop secret patterns; immutable patterns can't be removed.
+2. **Sealed workspace registry** — file hashes live outside the agent mount; manifest tampering fails `diff`/`apply`.
+3. **Explicit escape hatches** — `--allow-findings`, `--force`, `--allow-network` are audit signals, not "safe mode".
+4. **No host fallback** — no Docker/Podman means no `mug run`, not silent execution on your machine.
+5. **Local recovery** — snapshots stay on disk; never upload them to an AI service.
+
+## How it compares
+
+| | Upload repo ZIP | `.gitignore` only | Command guard (dcg) | **mug** |
+|---|:---:|:---:|:---:|:---:|
+| Strip secrets before upload | ✗ | ✗ | ✗ | ✅ |
+| Agent works on sanitized copy | ✗ | ✗ | ✗ | ✅ |
+| Review patches before apply | ✗ | ✗ | ✗ | ✅ |
+| Block mass deletion / protected paths | ✗ | ✗ | partial | ✅ |
+| Container isolation (`mug run`) | ✗ | ✗ | ✗ | ✅ |
+| Per-finding false-positive baseline | ✗ | ✗ | ✗ | ✅ |
+| Blocks destructive shell patterns | ✗ | ✗ | ✅ | ✅ (`mug guard`) |
+| Model-agnostic | ✗ | ✅ | ✅ | ✅ |
+| Stdlib-only, no runtime deps | — | — | varies | ✅ |
+
+Use **both** mug and a command guard: mug controls *what leaves and returns*; dcg blocks *known destructive commands* at execution time.
 
 ## Commands
 
-| Command | Purpose |
+| Command | What it does |
 |---|---|
-| `mug` / `mug menu` | Interactive menu and quick-start guide |
-| `mug guide` | Print the typical safe workflow |
-| `mug init` | Write a deny-by-default `.mug.toml` |
-| `mug scan` | Find sensitive filenames and secret-like content |
-| `mug pack` | Create a sanitized ZIP for browser/chat upload |
-| `mug workspace` | Create a sanitized linked working copy |
-| `mug run` | Run a command inside Docker/Podman isolation |
-| `mug guard` | Preflight a command for obvious destructive patterns |
-| `mug diff` | Show path changes plus unified patches |
-| `mug apply` | Snapshot and apply a reviewed change set (`--dry-run` supported) |
-| `mug snapshot` | Create a private local recovery archive |
-| `mug snapshots` | List recovery archives for a project |
-| `mug restore` | Restore an archive into a new empty directory |
-| `mug doctor` | Check Python, configuration, and sandbox availability |
+| `mug` / `mug menu` | Interactive menu (status, quick actions) |
+| `mug guide` | Print the safe workflow |
+| `mug init` | Write deny-by-default `.mug.toml` |
+| `mug scan` | Secret & sensitive scan (`--update-baseline` to accept reviewed findings) |
+| `mug pack` | Sanitized ZIP for browser/chat upload |
+| `mug workspace` | Sanitized copy for coding agents |
+| `mug run` | Sandbox agent in Docker/Podman (`--allow-network` dual-gated) |
+| `mug diff` | Path changes + unified patches |
+| `mug apply` | Snapshot + apply (`--dry-run` first) |
+| `mug guard` | Preflight destructive shell patterns |
+| `mug doctor` | Python, config, sandbox posture (+ update hint) |
+| `mug update` | Self-update from GitHub (`--check` only) |
+| `mug snapshot` / `snapshots` / `restore` | Private local recovery archives |
 
-Machine-readable output is available through `--json` on the main inspection commands. Progress bars write to stderr and only appear on an interactive TTY.
+Add `--json` on inspection commands for CI. Progress bars on TTY only (`MUG_NO_PROGRESS=1` or `CI=1` to disable).
 
-## Configuration
-
-Run `mug init`, then edit `.mug.toml`.
-
-Security posture is fail-closed:
-
-- immutable secret/credential patterns are always enforced and cannot be removed;
-- `exclude` / `protected` keys only **add** patterns (a short list can no longer drop defaults);
-- unscanned binary/large files block export by default;
-- sandbox network requires both `sandbox.network = true` and `mug run --allow-network`.
+## Configuration snapshot
 
 ```toml
 [scan]
-max_file_bytes = 1048576
 fail_on = "high"
 fail_on_unscanned = true
-entropy_threshold = 4.5
-entropy_min_length = 32
 
 [export]
-exclude_add = ["private/", "*.local.json"]
-exclude_remove = []
+exclude_add = ["private/"]
 allow_weaken_defaults = false
 
-[apply]
-max_changes = 200
-max_delete_ratio = 0.05
-protected_add = []
-protected_remove = []
-
 [sandbox]
-engine = "auto"
-image = "python:3.12-alpine"
+profile = "python-dev"   # default | agent-shell | python-dev | node-dev
 network = false
-memory = "2g"
-cpus = "2"
-pids_limit = 256
 user = "65534:65534"
 read_only_root = true
+home_tmpfs = true        # ephemeral HOME for agent CLIs
 ```
 
-Project configuration merges over user-wide defaults stored at `~/.config/mug/config.toml`.
+Project `.mug.toml` merges over `~/.config/mug/config.toml`. See [`examples/mug.toml`](./examples/mug.toml).
 
-## Typical integrations
+## Privacy & security, by default
 
-### Browser-based AI upload
+- **Export blocked on secrets** — scan runs before pack/workspace; unscanned binaries and large files refused by default.
+- **Immutable excludes** — `.env`, keys, credentials patterns always enforced.
+- **Dual-gated network** — `sandbox.network = true` **and** `mug run --allow-network`.
+- **Transactional apply** — failed apply rolls back; pre-apply snapshot kept.
+- **No phone-home** — `mug update` runs only when you ask; `doctor` may suggest an update if you run it online.
 
-```bash
-mug scan
-mug pack . -o safe-upload.zip
-```
-
-Upload only `safe-upload.zip`, never the original repository archive.
-
-### Claude Code, Codex CLI, Gemini CLI, Grok Build, Cursor, or another terminal agent
-
-Create the workspace first, then launch the tool through `mug run` using a container image that contains that agent. Do not mount your home directory, SSH directory, cloud configuration, Docker socket, or original repository into the container.
-
-Example with a custom image:
-
-```toml
-[sandbox]
-image = "my-company/coding-agent:latest"
-network = false
-```
-
-```bash
-mug run ../project-ai-workspace -- my-agent
-```
-
-Network is disabled by default. Enabling it is a dual-gated material security decision:
-
-1. set `sandbox.network = true` in `.mug.toml`
-2. pass `--allow-network` on `mug run`
-
-### Pairing with Destructive Command Guard
-
-Use both layers:
-
-1. `mug` sanitizes uploads, isolates the working copy, reviews returned changes, and snapshots before apply.
-2. A command hook such as `dcg` blocks known destructive shell, Git, database, cloud, container, and infrastructure commands before execution.
-
-Neither layer makes arbitrary code safe. Together they reduce different failure modes.
-
-## Threat model
-
-### `mug` is designed to reduce
-
-- accidental upload of common secret files;
-- common hard-coded credentials and high-entropy secret-like blobs in text files;
-- silent export of unscanned binary/large files;
-- accidental weakening of exclude/protected defaults via short config lists;
-- exposure of Git internals and unrelated home-directory content;
-- direct writes from an agent to the original repository;
-- workspace-manifest tampering during diff/apply (sealed local registry);
-- accidental mass deletion in returned changes;
-- modification of protected paths;
-- irrecoverable apply operations without a local snapshot;
-- obvious destructive commands launched through `mug run`;
-- accidental sandbox network enablement without dual confirmation.
-
-### `mug` does not guarantee protection from
-
-- unknown secret formats or secrets carefully hidden to evade entropy/heuristics;
-- malicious or vulnerable container images, kernels, runtimes, IDE extensions, browser extensions, or operating systems;
-- a user manually mounting sensitive host paths or dual-confirming network access;
-- an agent executed directly on the host outside `mug`;
-- supply-chain attacks in dependencies installed inside or outside the sandbox;
-- data already committed to Git history or already uploaded elsewhere;
-- semantic backdoors that look like legitimate code changes;
-- every possible destructive command or shell obfuscation.
-
-Review diffs, use Git, protect credentials at the provider level, use short-lived tokens, and keep reliable backups.
-
-## Safe defaults and escape hatches
-
-Security controls are intentionally inconvenient to bypass:
-
-- secret-like and unscanned findings block export unless `--allow-findings` is explicitly supplied;
-- immutable exclude/protected patterns cannot be removed;
-- apply requires `--yes` (use `--dry-run` first);
-- deletions additionally require `--allow-delete`;
-- high-volume changes and excessive deletion ratios require `--force`;
-- protected-path changes cannot be forced;
-- sandbox network requires config + `--allow-network`;
-- missing Docker/Podman produces an error rather than direct host execution.
-
-`--allow-findings`, `--force`, and `--allow-network` are audit signals, not proof of safety.
-
-## Recovery
-
-Create a snapshot manually:
-
-```bash
-mug snapshot .
-mug snapshots .
-```
-
-Restore into a new empty directory:
-
-```bash
-mug restore ~/.local/state/model-upload-guard/snapshots/.../SNAPSHOT.tar.gz ../restored-copy --yes
-```
-
-Snapshots are local, include sensitive project files needed for recovery, and are stored with restrictive permissions where the operating system permits. Never upload snapshot archives to an AI service.
+Honest limitations: [`SECURITY.md`](./SECURITY.md). mug reduces risk; it does not make arbitrary agent code safe.
 
 ## Development
 
 ```bash
 python -m unittest discover -s tests -v
+ruff check mug tests
+mypy mug
 python -m mug --version
 ```
 
-The regression suite includes path normalization, fail-closed config merge, unscanned-binary refusal, manifest tamper detection, unified diffs, confirmation gates, deletion refusal, protected-path refusal, and pre-apply snapshot behavior.
+38 tests · ruff + mypy in CI · release workflow publishes wheels + SHA256 checksums.
 
-## Roadmap
+## Contributing
 
-- signed release artifacts and checksum verification;
-- native Windows PowerShell installer;
-- richer allowlists for intentional test fixtures;
-- OCI image profiles for popular coding agents;
-- Git-aware patch export and three-way apply;
-- optional integration adapters for agent hook systems;
-- policy packs for WordPress, Firebase, Railway, cloud CLIs, and production databases;
-- SBOM and reproducible releases.
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Security reports: private GitHub advisory ([SECURITY.md](./SECURITY.md)).
 
 ## License
 
-MIT. Free for personal and commercial use. Contributions and security reviews are welcome.
+[MIT](./LICENSE) © Davide Volpato and contributors. Free for personal and commercial use.

@@ -7,16 +7,19 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mug.apply import apply_changes, compute_changes
-from mug.config import Config, IMMUTABLE_EXCLUDES, load_config, path_matches
-from mug.sandbox import inspect_command
-from mug.scanner import blocks_export, scan_tree, _entropy_findings
-from mug.snapshot import create_snapshot, restore_snapshot
-from mug.utils import MugError, normalize_rel
+from mug.baseline import load_baseline, write_baseline
 from mug.cli import main
+from mug.config import IMMUTABLE_EXCLUDES, Config, load_config, path_matches
+from mug.sandbox import _size_to_bytes, inspect_command, run_sandbox
+from mug.scanner import _entropy_findings, blocks_export, scan_tree
+from mug.snapshot import create_snapshot, restore_snapshot
 from mug.ui import ProgressBar, read_menu_choice
+from mug.update import is_newer, parse_version
+from mug.utils import MugError, normalize_rel
 from mug.workspace import create_pack, create_workspace, resolve_workspace
 
 
@@ -64,6 +67,32 @@ class ConfigSecurityTests(unittest.TestCase):
         config = Config()
         for pattern in IMMUTABLE_EXCLUDES:
             self.assertIn(pattern, config.exclude)
+
+    def test_sandbox_profile_sets_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".mug.toml").write_text(
+                "\n".join(
+                    [
+                        "[sandbox]",
+                        'profile = "node-dev"',
+                        'image = "custom:local"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(root)
+            self.assertEqual(config.sandbox_profile, "node-dev")
+            # Explicit image wins over profile preset.
+            self.assertEqual(config.sandbox_image, "custom:local")
+
+    def test_unknown_sandbox_profile_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".mug.toml").write_text('[sandbox]\nprofile = "nope"\n', encoding="utf-8")
+            with self.assertRaises(MugError):
+                load_config(root)
 
 
 class ScanAndPackTests(unittest.TestCase):
@@ -328,5 +357,170 @@ class UiAndProgressTests(unittest.TestCase):
             self.assertEqual(read_menu_choice(), "exit")
         with patch("builtins.input", return_value="0"):
             self.assertEqual(read_menu_choice(), "exit")
+        with patch("builtins.input", return_value="u"):
+            self.assertEqual(read_menu_choice(), "update")
+
+
+class BaselineTests(unittest.TestCase):
+    def _secret_line(self) -> str:
+        return "const token = '" + "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890" + "';\n"
+
+    def test_baseline_accepts_specific_finding_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.js").write_text(self._secret_line(), encoding="utf-8")
+            findings = scan_tree(root, Config())
+            self.assertTrue(blocks_export(findings, "high", True))
+
+            path, count = write_baseline(root, [f for f in findings if f.rule != "sensitive-filename"])
+            self.assertTrue(path.exists())
+            self.assertGreaterEqual(count, 1)
+
+            baseline = load_baseline(root)
+            findings = scan_tree(root, Config(), baseline=baseline)
+            self.assertTrue(all(f.baselined for f in findings if f.rule == "github-token"))
+            self.assertFalse(blocks_export(findings, "high", True))
+
+    def test_baseline_invalidated_when_content_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.js").write_text(self._secret_line(), encoding="utf-8")
+            findings = scan_tree(root, Config())
+            write_baseline(root, findings)
+            # A different secret in the same file must block again.
+            (root / "config.js").write_text(
+                "const token = '" + "ghp_" + "zyxwvutsrqponmlkjihgfedcba0987654321" + "';\n",
+                encoding="utf-8",
+            )
+            findings = scan_tree(root, Config(), baseline=load_baseline(root))
+            self.assertTrue(blocks_export(findings, "high", True))
+
+    def test_baseline_unblocks_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (root / "config.js").write_text(self._secret_line(), encoding="utf-8")
+            output = Path(tmp) / "out.zip"
+            with self.assertRaises(MugError):
+                create_pack(root, output, Config())
+            findings = scan_tree(root, Config())
+            write_baseline(root, findings)
+            create_pack(root, output, Config())
+            with zipfile.ZipFile(output) as archive:
+                names = archive.namelist()
+            self.assertIn("project/config.js", names)
+            # The baseline itself must never be exported.
+            self.assertNotIn("project/.mug-baseline.json", names)
+
+    def test_baseline_file_is_protected_from_workspace_apply(self) -> None:
+        self.assertTrue(path_matches(".mug-baseline.json", Config().protected))
+        self.assertTrue(path_matches(".mug-baseline.json", Config().exclude))
+
+
+class ApplyRollbackTests(unittest.TestCase):
+    def test_failed_apply_rolls_back_previous_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "source"
+            workspace = base / "workspace"
+            state = base / "state"
+            source.mkdir()
+            (source / "a.txt").write_text("original-a\n", encoding="utf-8")
+            (source / "b.txt").write_text("original-b\n", encoding="utf-8")
+            with patch("mug.workspace.state_dir", return_value=state), patch(
+                "mug.snapshot.state_dir", return_value=state
+            ), patch("mug.utils.state_dir", return_value=state):
+                create_workspace(source, workspace, Config())
+                (workspace / "a.txt").write_text("agent-a\n", encoding="utf-8")
+                (workspace / "b.txt").write_text("agent-b\n", encoding="utf-8")
+
+                real_atomic_write = __import__("mug.utils", fromlist=["atomic_write"]).atomic_write
+                calls = {"n": 0}
+
+                def failing_atomic_write(path, data, mode=None):
+                    calls["n"] += 1
+                    if calls["n"] >= 2:
+                        raise OSError("disk full (simulated)")
+                    real_atomic_write(path, data, mode)
+
+                with patch("mug.apply.atomic_write", side_effect=failing_atomic_write):
+                    with self.assertRaises(MugError) as ctx:
+                        apply_changes(workspace, Config(), yes=True, allow_delete=False, force=False)
+                self.assertIn("rolled back", str(ctx.exception))
+                # First write succeeded then must be restored to the original content.
+                self.assertEqual((source / "a.txt").read_text(encoding="utf-8"), "original-a\n")
+                self.assertEqual((source / "b.txt").read_text(encoding="utf-8"), "original-b\n")
+
+
+class SandboxTests(unittest.TestCase):
+    def test_size_to_bytes(self) -> None:
+        self.assertEqual(_size_to_bytes("512m"), 512 * 1024 * 1024)
+        self.assertEqual(_size_to_bytes("1g"), 1024**3)
+        self.assertEqual(_size_to_bytes("4096"), 4096)
+        with self.assertRaises(MugError):
+            _size_to_bytes("lots")
+
+    def test_run_sandbox_mounts_writable_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "source"
+            workspace = base / "workspace"
+            state = base / "state"
+            source.mkdir()
+            (source / "a.txt").write_text("a\n", encoding="utf-8")
+            with patch("mug.workspace.state_dir", return_value=state), patch(
+                "mug.utils.state_dir", return_value=state
+            ):
+                create_workspace(source, workspace, Config())
+                captured: dict[str, list[str]] = {}
+
+                def fake_run(args, check=False):
+                    captured["args"] = list(args)
+                    return SimpleNamespace(returncode=0)
+
+                with patch("mug.sandbox.shutil.which", return_value="/usr/bin/docker"), patch(
+                    "mug.sandbox.subprocess.run", side_effect=fake_run
+                ):
+                    code = run_sandbox(workspace, ["sh"], Config(), False)
+                self.assertEqual(code, 0)
+                joined = " ".join(captured["args"])
+                self.assertIn("type=tmpfs,dst=/home/agent", joined)
+                self.assertIn("HOME=/home/agent", joined)
+                self.assertIn("--network=none", joined)
+                self.assertIn("--user 65534:65534", joined)
+
+
+class UpdateTests(unittest.TestCase):
+    def test_parse_version(self) -> None:
+        self.assertEqual(parse_version("v0.3.0"), (0, 3, 0))
+        self.assertEqual(parse_version("1.2.10"), (1, 2, 10))
+        self.assertIsNone(parse_version("not-a-version"))
+
+    def test_is_newer(self) -> None:
+        self.assertTrue(is_newer("v0.3.1", "0.3.0"))
+        self.assertTrue(is_newer("v1.0.0", "0.9.9"))
+        self.assertFalse(is_newer("v0.3.0", "0.3.0"))
+        self.assertFalse(is_newer("v0.2.9", "0.3.0"))
+        self.assertFalse(is_newer("garbage", "0.3.0"))
+
+
+class GitignoreWarningTests(unittest.TestCase):
+    def test_gitignored_exported_file_is_flagged(self) -> None:
+        import shutil as _shutil
+        import subprocess as _subprocess
+
+        if not _shutil.which("git"):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+            (root / ".gitignore").write_text("local-config.txt\n", encoding="utf-8")
+            (root / "local-config.txt").write_text("host = example.test\n", encoding="utf-8")
+            (root / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            findings = scan_tree(root, Config())
+            flagged = [f for f in findings if f.rule == "gitignored-file"]
+            self.assertEqual([f.path for f in flagged], ["local-config.txt"])
+            # medium severity: warns but does not block at the default fail_on=high
+            self.assertFalse(blocks_export(findings, "high", True))
 
 

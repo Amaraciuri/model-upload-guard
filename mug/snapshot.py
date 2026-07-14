@@ -5,7 +5,14 @@ import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .utils import MugError, iter_regular_files, project_key, safe_join, state_dir, write_json
+from .utils import (
+    MugError,
+    iter_regular_files,
+    project_key,
+    safe_join,
+    state_dir,
+    write_json,
+)
 
 SNAPSHOT_EXCLUDES = {
     ".git",

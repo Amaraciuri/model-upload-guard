@@ -9,7 +9,6 @@ from .config import Config
 from .utils import MugError
 from .workspace import resolve_workspace
 
-
 DANGEROUS_COMMANDS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?:^|[;&|]\s*)rm\s+-[^\n]*r[^\n]*f[^\n]*(?:\s/|\s~(?:/|\s|$)|\s\.\.(?:/|\s|$))", re.I), "Recursive force deletion outside the workspace"),
     (re.compile(r"\bgit\s+reset\s+--hard\b", re.I), "git reset --hard can destroy uncommitted work"),
@@ -29,6 +28,19 @@ DANGEROUS_COMMANDS: list[tuple[re.Pattern[str], str]] = [
 
 def inspect_command(command: str) -> list[str]:
     return [message for pattern, message in DANGEROUS_COMMANDS if pattern.search(command)]
+
+
+def _size_to_bytes(value: str) -> int:
+    raw = value.strip().lower()
+    multipliers = {"k": 1024, "m": 1024**2, "g": 1024**3}
+    if raw and raw[-1] in multipliers:
+        number, unit = raw[:-1], multipliers[raw[-1]]
+    else:
+        number, unit = raw, 1
+    try:
+        return int(float(number) * unit)
+    except ValueError as exc:
+        raise MugError(f"Invalid sandbox size value: {value}") from exc
 
 
 def choose_engine(config: Config) -> str:
@@ -96,6 +108,18 @@ def run_sandbox(
         args.append("--read-only")
     if config.sandbox_user:
         args.extend(["--user", config.sandbox_user])
+    if config.sandbox_home_tmpfs:
+        # Writable HOME so agent CLIs (config, caches, venvs) work as non-root
+        # with a read-only root filesystem. tmpfs: nothing persists after exit.
+        home_bytes = _size_to_bytes(config.sandbox_home_size)
+        args.extend(
+            [
+                "--mount",
+                f"type=tmpfs,dst=/home/agent,tmpfs-size={home_bytes},tmpfs-mode=1777",
+                "--env",
+                "HOME=/home/agent",
+            ]
+        )
     if network_enabled:
         # Still no host network aliasing; use default bridge only when dual-gated.
         pass

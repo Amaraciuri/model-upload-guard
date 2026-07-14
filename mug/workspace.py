@@ -10,9 +10,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .baseline import load_baseline
 from .config import Config, path_matches
 from .scanner import blocks_export, scan_tree
-from .utils import MugError, copy_mode, iter_regular_files, sha256_file, state_dir, write_json
+from .utils import (
+    MugError,
+    copy_mode,
+    iter_regular_files,
+    sha256_file,
+    state_dir,
+    write_json,
+)
 
 MANIFEST_NAME = ".mug-manifest.json"
 WORKSPACE_ID_NAME = ".mug-id"
@@ -58,10 +66,11 @@ def create_workspace(
         raise MugError(f"Workspace destination is not empty: {destination}")
 
     hashes, excluded = build_manifest(source, config, on_progress=on_progress)
-    findings = scan_tree(source, config, on_progress=on_progress)
+    findings = scan_tree(source, config, on_progress=on_progress, baseline=load_baseline(source))
     if blocks_export(findings, config.fail_on, config.fail_on_unscanned) and not allow_findings:
         raise MugError(
-            "Secret-like or unscanned content was detected. Review `mug scan` or pass --allow-findings explicitly."
+            "Secret-like or unscanned content was detected. Review `mug scan`, baseline reviewed "
+            "findings with `mug scan --update-baseline`, or pass --allow-findings explicitly."
         )
     destination.mkdir(parents=True, exist_ok=True)
     copy_items = [(rel, source / rel) for rel in hashes]
@@ -125,9 +134,12 @@ def create_pack(
     source = source.resolve()
     output = output.expanduser().resolve()
     hashes, excluded = build_manifest(source, config, on_progress=on_progress)
-    findings = scan_tree(source, config, on_progress=on_progress)
+    findings = scan_tree(source, config, on_progress=on_progress, baseline=load_baseline(source))
     if blocks_export(findings, config.fail_on, config.fail_on_unscanned) and not allow_findings:
-        raise MugError("Secret-like or unscanned content was detected. Export stopped. Review `mug scan`.")
+        raise MugError(
+            "Secret-like or unscanned content was detected. Export stopped. Review `mug scan` or "
+            "baseline reviewed findings with `mug scan --update-baseline`."
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise MugError(f"Output already exists: {output}")

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import math
 import re
+import shutil
+import subprocess
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .baseline import make_fingerprint
 from .config import Config, path_matches
-from .utils import is_binary, iter_regular_files
+from .utils import is_binary, iter_regular_files, sha256_file
 
 ProgressCb = Callable[[int, int, str], None]
 
@@ -27,6 +30,8 @@ class Finding:
     line: int | None
     message: str
     excerpt: str = ""
+    fingerprint: str = ""
+    baselined: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -158,8 +163,10 @@ def scan_tree(
     config: Config,
     include_excluded_names: bool = True,
     on_progress: ProgressCb | None = None,
+    baseline: set[str] | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
+    exportable: list[str] = []
     files = list(iter_regular_files(root))
     total = len(files)
     for index, (rel, path) in enumerate(files, start=1):
@@ -168,21 +175,79 @@ def scan_tree(
         excluded = path_matches(rel, config.exclude)
         if include_excluded_names and path_matches(rel, SENSITIVE_NAME_PATTERNS):
             findings.append(
-                Finding("high", "sensitive-filename", rel, None, "Sensitive file is present and will be excluded")
+                Finding(
+                    "high",
+                    "sensitive-filename",
+                    rel,
+                    None,
+                    "Sensitive file is present and will be excluded",
+                    fingerprint=make_fingerprint("sensitive-filename", rel, ""),
+                )
             )
         if excluded:
             continue
+        exportable.append(rel)
         findings.extend(scan_file(rel, path, config))
+    findings.extend(_gitignored_findings(root, exportable))
+    if baseline:
+        for finding in findings:
+            if finding.fingerprint and finding.fingerprint in baseline:
+                finding.baselined = True
     return findings
+
+
+def _gitignored_findings(root: Path, exportable: list[str]) -> list[Finding]:
+    """Warn about gitignored files that would still be exported.
+
+    Gitignored files are often local-only configuration and are a common place
+    for secrets that never appear in Git history. Best effort: requires the
+    `git` binary and a `.git` directory; silent otherwise.
+    """
+    if not exportable or not (root / ".git").exists() or not shutil.which("git"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--stdin", "-z"],
+            input=b"\x00".join(rel.encode("utf-8") for rel in exportable) + b"\x00",
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode not in {0, 1}:
+        return []
+    ignored = [item for item in proc.stdout.decode("utf-8", errors="replace").split("\x00") if item]
+    return [
+        Finding(
+            "medium",
+            "gitignored-file",
+            rel,
+            None,
+            "Gitignored file would still be exported; add it to export.exclude_add if it is local-only",
+            fingerprint=make_fingerprint("gitignored-file", rel, ""),
+        )
+        for rel in ignored
+    ]
 
 
 def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
     try:
         size = path.stat().st_size
     except OSError:
-        return [Finding("medium", "unreadable-file", rel, None, "File could not be read")]
+        return [
+            Finding(
+                "medium",
+                "unreadable-file",
+                rel,
+                None,
+                "File could not be read",
+                fingerprint=make_fingerprint("unreadable-file", rel, ""),
+            )
+        ]
 
     if is_binary(path):
+        # Fingerprint binds the exact file content: if the binary changes,
+        # a baselined acceptance stops matching and blocks again.
         return [
             Finding(
                 "high",
@@ -190,6 +255,7 @@ def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
                 rel,
                 None,
                 "Binary file skipped by content scanner; refused for export by default",
+                fingerprint=make_fingerprint("unscanned-binary", rel, _safe_file_hash(path)),
             )
         ]
     if size > config.max_file_bytes:
@@ -204,13 +270,23 @@ def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
                 rel,
                 None,
                 f"File exceeds scan limit ({config.max_file_bytes} bytes); refused for export by default. {tip}",
+                fingerprint=make_fingerprint("unscanned-large", rel, _safe_file_hash(path)),
             )
         ]
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return [Finding("medium", "unreadable-file", rel, None, "File could not be read")]
+        return [
+            Finding(
+                "medium",
+                "unreadable-file",
+                rel,
+                None,
+                "File could not be read",
+                fingerprint=make_fingerprint("unreadable-file", rel, ""),
+            )
+        ]
 
     findings: list[Finding] = []
     for line_no, line in enumerate(text.splitlines(), start=1):
@@ -218,9 +294,27 @@ def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
             match = pattern.search(line)
             if match:
                 excerpt = _redact(line.strip(), match.start(), match.end())
-                findings.append(Finding(severity, rule, rel, line_no, message, excerpt))
+                material = line[match.start() : match.end()]
+                findings.append(
+                    Finding(
+                        severity,
+                        rule,
+                        rel,
+                        line_no,
+                        message,
+                        excerpt,
+                        fingerprint=make_fingerprint(rule, rel, material),
+                    )
+                )
         findings.extend(_entropy_findings(rel, line_no, line, config))
     return findings
+
+
+def _safe_file_hash(path: Path) -> str:
+    try:
+        return sha256_file(path)
+    except OSError:
+        return ""
 
 
 def _shannon_entropy(value: str) -> float:
@@ -299,6 +393,7 @@ def _entropy_findings(rel: str, line_no: int, line: str, config: Config) -> list
                 line_no,
                 f"High-entropy string (entropy={entropy:.2f}); possible secret",
                 _redact(line.strip(), start, end),
+                fingerprint=make_fingerprint("high-entropy", rel, token),
             )
         )
     return findings
@@ -315,6 +410,8 @@ def _redact(line: str, start: int, end: int) -> str:
 def blocks_export(findings: Iterable[Finding], fail_on: str, fail_on_unscanned: bool = True) -> bool:
     threshold = SEVERITY_ORDER[fail_on]
     for finding in findings:
+        if finding.baselined:
+            continue
         if finding.rule in NON_BLOCKING_RULES:
             continue
         if finding.rule in {"unscanned-binary", "unscanned-large"} and not fail_on_unscanned:

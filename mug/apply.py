@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import difflib
+import os
+import shutil
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import Config, path_matches
 from .snapshot import create_snapshot
-from .utils import MugError, atomic_write, iter_regular_files, is_binary, safe_join, sha256_file
+from .utils import (
+    MugError,
+    atomic_write,
+    is_binary,
+    iter_regular_files,
+    safe_join,
+    sha256_file,
+)
 from .workspace import MANIFEST_NAME, WORKSPACE_ID_NAME, resolve_workspace
 
 
@@ -101,6 +111,8 @@ def apply_changes(
         raise MugError(f"Change set contains {len(actionable)} files; configured maximum is {config.max_changes}.")
 
     source_files = manifest.get("source_files", {})
+    if not isinstance(source_files, dict):
+        raise MugError("Invalid workspace manifest during apply validation")
     delete_changes = [change for change in actionable if change.action == "delete"]
     denominator = max(1, len(source_files))
     delete_ratio = len(delete_changes) / denominator
@@ -127,22 +139,74 @@ def apply_changes(
     snapshot = create_snapshot(original, reason="pre-apply")
     _, resolved_workspace, _ = resolve_workspace(workspace)
     applied: list[dict[str, object]] = []
-    for change in actionable:
-        destination = safe_join(original, change.path)
-        if change.action in {"add", "modify"}:
-            source = safe_join(resolved_workspace, change.path)
-            if source.is_symlink() or not source.is_file():
-                raise MugError(f"Refusing non-regular workspace file: {change.path}")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(destination, source.read_bytes(), source.stat().st_mode & 0o777)
-        elif change.action == "delete":
-            if destination.is_dir():
-                raise MugError(f"Refusing directory deletion: {change.path}")
-            destination.unlink(missing_ok=True)
-            _remove_empty_parents(destination.parent, original)
-        applied.append(change.to_dict())
+    # Journal of touched paths so a mid-apply failure rolls back automatically
+    # instead of leaving the repository half-applied.
+    journal: list[tuple[Path, Path | None, int | None]] = []
+    backup_root = Path(tempfile.mkdtemp(prefix="mug-apply-journal-"))
+    try:
+        for change in actionable:
+            destination = safe_join(original, change.path)
+            if change.action in {"add", "modify"}:
+                source = safe_join(resolved_workspace, change.path)
+                if source.is_symlink() or not source.is_file():
+                    raise MugError(f"Refusing non-regular workspace file: {change.path}")
+                _journal_record(journal, backup_root, destination)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write(destination, source.read_bytes(), source.stat().st_mode & 0o777)
+            elif change.action == "delete":
+                if destination.is_dir():
+                    raise MugError(f"Refusing directory deletion: {change.path}")
+                _journal_record(journal, backup_root, destination)
+                destination.unlink(missing_ok=True)
+                _remove_empty_parents(destination.parent, original)
+            applied.append(change.to_dict())
+    except BaseException as exc:
+        rolled_back = _rollback(journal, original)
+        if rolled_back:
+            raise MugError(
+                f"Apply failed and was rolled back ({exc}). "
+                f"The repository is unchanged; pre-apply snapshot kept at {snapshot}."
+            ) from exc
+        raise MugError(
+            f"Apply failed and automatic rollback was incomplete ({exc}). "
+            f"Restore from the pre-apply snapshot: mug restore {snapshot} <new-empty-dir> --yes"
+        ) from exc
+    finally:
+        shutil.rmtree(backup_root, ignore_errors=True)
 
     return {"snapshot": str(snapshot), "applied": applied, "count": len(applied), "dry_run": False}
+
+
+def _journal_record(
+    journal: list[tuple[Path, Path | None, int | None]],
+    backup_root: Path,
+    destination: Path,
+) -> None:
+    if destination.is_file() and not destination.is_symlink():
+        backup = backup_root / str(len(journal))
+        shutil.copyfile(destination, backup)
+        journal.append((destination, backup, destination.stat().st_mode & 0o777))
+    else:
+        journal.append((destination, None, None))
+
+
+def _rollback(journal: list[tuple[Path, Path | None, int | None]], original: Path) -> bool:
+    success = True
+    for destination, backup, mode in reversed(journal):
+        try:
+            if backup is not None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                # Plain writes on purpose: restore must not depend on the same
+                # code path that may have just failed (e.g. tmpfile creation).
+                destination.write_bytes(backup.read_bytes())
+                if mode is not None:
+                    os.chmod(destination, mode)
+            else:
+                destination.unlink(missing_ok=True)
+                _remove_empty_parents(destination.parent, original)
+        except OSError:
+            success = False
+    return success
 
 
 def _unified_patch(original: Path | None, workspace_file: Path, rel: str) -> str | None:

@@ -7,7 +7,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 
 
 def _want_color(stream: object | None = None) -> bool:
@@ -136,9 +136,9 @@ def err(msg: str) -> None:
 class ProgressBar:
     """Single-line stderr progress bar. Silent when not a TTY or MUG_NO_PROGRESS=1."""
 
-    def __init__(self, label: str, stream: object | None = None) -> None:
+    def __init__(self, label: str, stream: TextIO | None = None) -> None:
         self.label = label
-        self.stream = stream if stream is not None else sys.stderr
+        self.stream: TextIO = stream if stream is not None else sys.stderr
         self.enabled = (
             bool(getattr(self.stream, "isatty", lambda: False)())
             and not os.environ.get("MUG_NO_PROGRESS")
@@ -201,6 +201,7 @@ MENU_ITEMS: tuple[MenuItem, ...] = (
     MenuItem("2", "Cheat sheet", "Every command with examples", "cheatsheet", "Learn"),
     MenuItem("3", "Doctor", "Python, config, sandbox posture", "doctor", "Setup"),
     MenuItem("4", "Init", "Create deny-by-default .mug.toml", "init", "Setup"),
+    MenuItem("u", "Update", "Update mug from GitHub", "update", "Setup"),
     MenuItem("5", "Scan", "Secrets & sensitive files here", "scan", "Export"),
     MenuItem("6", "Pack", "Sanitized ZIP for chat / browser AI", "pack", "Export"),
     MenuItem("7", "Workspace", "Sanitized copy for coding agents", "workspace", "Agent"),
@@ -216,6 +217,7 @@ def print_guide() -> None:
     steps = [
         ("mug init", "Write local deny-by-default config (.mug.toml)"),
         ("mug scan", "See what would be blocked before anything leaves"),
+        ("mug scan --update-baseline", "Accept individually reviewed false positives"),
         ("mug pack -o out.zip", "Sanitized ZIP for ChatGPT / Claude / browser tools"),
         ("mug workspace -o ../proj-ai", "Sanitized working copy for coding agents"),
         ("mug run ../proj-ai -- …", "Optional: run agent in Docker/Podman, no network"),
@@ -246,6 +248,8 @@ def print_cheatsheet() -> None:
         ("mug run <ws> -- cmd…", "Sandbox run (Docker/Podman)"),
         ("mug guard -- <cmd>", "Destructive-command preflight"),
         ("mug doctor", "Local posture check"),
+        ("mug scan --update-baseline", "Accept reviewed findings individually"),
+        ("mug update [--check]", "Self-update from GitHub"),
         ("mug snapshot / snapshots / restore", "Private recovery archives"),
     ]
     print(c("Command cheat sheet", BOLD, ACCENT))

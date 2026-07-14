@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 - 2026-07-14
+
+Per-finding baselines, self-update, transactional apply, and an agent-ready sandbox.
+
+- `.mug-baseline.json`: accept individually reviewed findings with `mug scan --update-baseline` instead of the all-or-nothing `--allow-findings`. Fingerprints bind rule+path+content, so any change re-triggers blocking. The baseline is never exported and cannot be modified through a workspace.
+- `mug update`: self-update from GitHub (`--check` to only compare versions, `--ref` to pin). Explicit action only — mug never phones home on its own.
+- Transactional apply: a mid-apply failure now rolls back automatically to the pre-apply state; the snapshot is kept either way.
+- Sandbox: writable tmpfs `HOME=/home/agent` (nothing persists after exit) so agent CLIs work as non-root with a read-only root filesystem. Configurable via `sandbox.home_tmpfs` / `sandbox.home_size`.
+- Sandbox profiles: `sandbox.profile` presets (`default`, `agent-shell`, `python-dev`, `node-dev`) set a base image/stack; explicit `[sandbox]` keys override the preset.
+- Scanner: warns when a gitignored file would still be exported (`gitignored-file`, medium) — gitignored files are often local-only configs holding secrets.
+- CI: ruff lint job; release workflow builds artifacts with SHA256 checksums and supports PyPI Trusted Publishing.
+
 ## 0.2.2 - 2026-07-14
 
 Terminal UX: interactive menu, progress bars, and clearer guidance.
