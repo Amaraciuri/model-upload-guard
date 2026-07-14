@@ -39,17 +39,17 @@ REAL REPOSITORY
 
 ## Installation
 
-After the repository is published at `Amaraciuri/model-upload-guard`:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | bash
 ```
 
-For a reproducible installation, pin a release tag rather than `main`:
+Pin a release tag (recommended):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.1.0/install.sh | MUG_REF=v0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | MUG_REF=v0.2.2 bash
 ```
+
+If `raw.githubusercontent.com/.../v0.2.2/install.sh` returns 404 right after a release, use the command above (`main` script + `MUG_REF` tag). Tag URLs usually catch up within a few minutes.
 
 From a local clone:
 
@@ -65,7 +65,49 @@ Requirements:
 - Linux, macOS, or Windows through WSL for the shell installer
 - Docker or Podman only for `mug run`
 
-The installer creates a dedicated virtual environment under `~/.local/share/model-upload-guard` and links `mug` into `~/.local/bin`. The scanner, packer, workspace, diff, apply, snapshot, and restore features use the Python standard library and need no third-party runtime packages.
+The installer creates a dedicated virtual environment under `~/.local/share/model-upload-guard` and links `mug` into `~/.local/bin`. Re-running it upgrades in place (`pip install --upgrade`). No third-party runtime packages are required.
+
+## Updating
+
+Re-run the installer. It upgrades the existing venv.
+
+**Latest release (pinned):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | MUG_REF=v0.2.2 bash
+mug --version
+mug doctor
+```
+
+**Always tracking `main`:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/main/install.sh | bash
+```
+
+**From a local clone:**
+
+```bash
+cd model-upload-guard
+git pull
+./install.sh
+```
+
+Local recovery snapshots and workspace registry under `~/.local/state/model-upload-guard` are kept. `uninstall.sh` removes only the tool install, not those snapshots.
+
+## What's new in 0.2.x
+
+**Security (0.2.0)** — fail-closed defaults: immutable exclude/protected patterns, sealed workspace manifests, unscanned binary/large-file refusal, unified `mug diff` patches, `mug apply --dry-run`, dual-gated sandbox network, non-root sandbox user.
+
+**Scanner (0.2.1)** — fewer false positives on lockfiles/checksums, clearer large-file tips, broader default excludes (IDE junk, audio, jars, …).
+
+**Terminal UX (0.2.2)**
+
+- `mug` / `mug menu` — interactive menu and quick start
+- `mug guide` — print the safe workflow
+- Progress bars on `scan` / `pack` / `workspace` (TTY only; disable with `MUG_NO_PROGRESS=1` or `CI=1`)
+- Colorized findings/summary when the terminal supports it (`NO_COLOR=1` to disable)
+- `--json` stays machine-readable (no progress noise)
 
 ## Five-minute usage
 
@@ -75,7 +117,7 @@ Inside a project:
 mug                 # interactive menu + quick start
 # or:
 mug init
-mug scan
+mug scan            # progress bar on TTY
 mug pack . -o project-for-ai.zip
 ```
 
@@ -134,7 +176,7 @@ Before applying, `mug` creates a private local recovery snapshot. Protected file
 | `mug restore` | Restore an archive into a new empty directory |
 | `mug doctor` | Check Python, configuration, and sandbox availability |
 
-Machine-readable output is available through `--json` on the main inspection commands.
+Machine-readable output is available through `--json` on the main inspection commands. Progress bars write to stderr and only appear on an interactive TTY.
 
 ## Configuration
 

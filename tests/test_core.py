@@ -322,8 +322,10 @@ class UiAndProgressTests(unittest.TestCase):
         self.assertEqual(stream.getvalue(), "done\n")
 
     def test_menu_choice_maps_number(self) -> None:
-        with patch("builtins.input", return_value="9"):
+        with patch("builtins.input", return_value="2"):
             self.assertEqual(read_menu_choice(), "cheatsheet")
+        with patch("builtins.input", return_value="q"):
+            self.assertEqual(read_menu_choice(), "exit")
         with patch("builtins.input", return_value="0"):
             self.assertEqual(read_menu_choice(), "exit")
 

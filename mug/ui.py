@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 
@@ -29,22 +30,95 @@ DIM = "2"
 RED = "31"
 GREEN = "32"
 YELLOW = "33"
+BLUE = "34"
+MAGENTA = "35"
 CYAN = "36"
+WHITE = "37"
+
+# Soft cyan / teal vibe similar to polished CLIs.
+ACCENT = CYAN
+
+
+LOGO_MUG = r"""
+ ███╗   ███╗██╗   ██╗ ██████╗
+ ████╗ ████║██║   ██║██╔════╝
+ ██╔████╔██║██║   ██║██║  ███╗
+ ██║╚██╔╝██║██║   ██║██║   ██║
+ ██║ ╚═╝ ██║╚██████╔╝╚██████╔╝
+ ╚═╝     ╚═╝ ╚═════╝  ╚═════╝
+""".strip("\n")
 
 
 def banner(version: str) -> None:
+    """Legacy thin banner (used by non-menu commands)."""
     width = min(72, shutil.get_terminal_size((72, 20)).columns)
     title = f" Model Upload Guard  v{version} "
     line = "═" * width
-    print(c(line, DIM, CYAN))
-    print(c(title.center(width, "─"), BOLD, CYAN))
+    print(c(line, DIM, ACCENT))
+    print(c(title.center(width, "─"), BOLD, ACCENT))
     print(c(" Protect what leaves your machine. Review what comes back. ".center(width), DIM))
-    print(c(line, DIM, CYAN))
+    print(c(line, DIM, ACCENT))
     print()
 
 
+def render_home(version: str, *, cwd: Path | None = None) -> None:
+    """VEXP-style home: big logo, tagline, live status, then menu is separate."""
+    cwd = cwd or Path.cwd()
+    for line in LOGO_MUG.splitlines():
+        print(c(line, BOLD, ACCENT), end="")
+        # Put version on the middle logo row for a compact header.
+        if "██╔████╔██║" in line:
+            print(f"  {c(f'v{version}', DIM)}")
+        else:
+            print()
+    print()
+    print(c("  Model Upload Guard", BOLD, WHITE if _want_color() else BOLD))
+    print(c("  Safety boundary for sharing code with AI agents", DIM))
+    print()
+    _print_status(cwd)
+    print()
+
+
+def _dot(ok_state: bool) -> str:
+    return c("●", GREEN if ok_state else YELLOW, BOLD)
+
+
+def _print_status(cwd: Path) -> None:
+    config_path = cwd / ".mug.toml"
+    has_config = config_path.is_file()
+    docker = bool(shutil.which("docker"))
+    podman = bool(shutil.which("podman"))
+    sandbox_ok = docker or podman
+    if podman and docker:
+        sandbox_label = "podman + docker"
+    elif podman:
+        sandbox_label = "podman"
+    elif docker:
+        sandbox_label = "docker"
+    else:
+        sandbox_label = "missing (mug run unavailable)"
+
+    try:
+        short_cwd = str(cwd)
+        home = str(Path.home())
+        if short_cwd.startswith(home):
+            short_cwd = "~" + short_cwd[len(home) :]
+    except Exception:
+        short_cwd = str(cwd)
+
+    print(f"  {_dot(True)} {c('cwd', DIM)}     {c(short_cwd, BOLD)}")
+    print(
+        f"  {_dot(has_config)} {c('config', DIM)}  "
+        + (c(".mug.toml", GREEN) if has_config else c("defaults (run Init)", DIM))
+    )
+    print(
+        f"  {_dot(sandbox_ok)} {c('sandbox', DIM)} "
+        + (c(sandbox_label, GREEN) if sandbox_ok else c(sandbox_label, YELLOW))
+    )
+
+
 def info(msg: str) -> None:
-    print(f"{c('›', CYAN, BOLD)} {msg}")
+    print(f"{c('›', ACCENT, BOLD)} {msg}")
 
 
 def ok(msg: str) -> None:
@@ -83,7 +157,7 @@ class ProgressBar:
         name = detail.replace("\n", " ")
         if len(name) > 36:
             name = "…" + name[-35:]
-        colored = c(bar, CYAN, stream=self.stream) if _want_color(self.stream) else bar
+        colored = c(bar, ACCENT, stream=self.stream) if _want_color(self.stream) else bar
         line = f"\r{self.label:<10} [{colored}] {pct:3d}% {current}/{total or '?'}  {name}"
         self.stream.write(line + "\033[K")
         self.stream.flush()
@@ -119,24 +193,25 @@ class MenuItem:
     title: str
     blurb: str
     action: str
+    group: str = ""
 
 
 MENU_ITEMS: tuple[MenuItem, ...] = (
-    MenuItem("1", "Quick start", "How mug protects your repo (2-minute guide)", "guide"),
-    MenuItem("2", "Doctor", "Check Python, config, and sandbox readiness", "doctor"),
-    MenuItem("3", "Init", "Create deny-by-default .mug.toml here", "init"),
-    MenuItem("4", "Scan", "Find secrets / sensitive files in this project", "scan"),
-    MenuItem("5", "Pack", "Build a sanitized ZIP for chat/browser upload", "pack"),
-    MenuItem("6", "Workspace", "Create a sanitized copy for an AI coding agent", "workspace"),
-    MenuItem("7", "Diff", "Review changes in an AI workspace", "diff"),
-    MenuItem("8", "Apply", "Apply reviewed workspace changes (with snapshot)", "apply"),
-    MenuItem("9", "Command cheat sheet", "Print every mug command with examples", "cheatsheet"),
-    MenuItem("0", "Exit", "Leave the menu", "exit"),
+    MenuItem("1", "Quick start", "2-minute guide to the safe workflow", "guide", "Learn"),
+    MenuItem("2", "Cheat sheet", "Every command with examples", "cheatsheet", "Learn"),
+    MenuItem("3", "Doctor", "Python, config, sandbox posture", "doctor", "Setup"),
+    MenuItem("4", "Init", "Create deny-by-default .mug.toml", "init", "Setup"),
+    MenuItem("5", "Scan", "Secrets & sensitive files here", "scan", "Export"),
+    MenuItem("6", "Pack", "Sanitized ZIP for chat / browser AI", "pack", "Export"),
+    MenuItem("7", "Workspace", "Sanitized copy for coding agents", "workspace", "Agent"),
+    MenuItem("8", "Diff", "Review workspace changes + patches", "diff", "Agent"),
+    MenuItem("9", "Apply", "Snapshot + apply after review", "apply", "Agent"),
+    MenuItem("q", "Exit", "Leave the menu", "exit", ""),
 )
 
 
 def print_guide() -> None:
-    print(c("Typical safe workflow", BOLD, CYAN))
+    print(c("Typical safe workflow", BOLD, ACCENT))
     print()
     steps = [
         ("mug init", "Write local deny-by-default config (.mug.toml)"),
@@ -173,11 +248,11 @@ def print_cheatsheet() -> None:
         ("mug doctor", "Local posture check"),
         ("mug snapshot / snapshots / restore", "Private recovery archives"),
     ]
-    print(c("Command cheat sheet", BOLD, CYAN))
+    print(c("Command cheat sheet", BOLD, ACCENT))
     print()
     width = max(len(cmd) for cmd, _ in rows)
     for cmd, desc in rows:
-        print(f"  {c(cmd.ljust(width), BOLD, GREEN)}  {desc}")
+        print(f"  {c(cmd.ljust(width), BOLD, GREEN)}  {c(desc, DIM)}")
     print()
     print(c("Tips", BOLD, YELLOW))
     print("  • JSON output: add --json to scan/pack/workspace/diff/apply/doctor")
@@ -189,7 +264,19 @@ def print_cheatsheet() -> None:
 def prompt(message: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
     try:
-        raw = input(f"{c('?', CYAN, BOLD)} {message}{suffix}: ").strip()
+        raw = input(f"{c('?', ACCENT, BOLD)} {message}{suffix}: ").strip()
+    except EOFError:
+        return default or ""
+    if not raw and default is not None:
+        return default
+    return raw
+
+
+def mug_prompt(default: str | None = None) -> str:
+    """Primary menu prompt, styled like `vexp>`."""
+    suffix = f" [{default}]" if default is not None else ""
+    try:
+        raw = input(f"{c('mug>', ACCENT, BOLD)}{c(suffix, DIM)} ").strip()
     except EOFError:
         return default or ""
     if not raw and default is not None:
@@ -206,16 +293,33 @@ def confirm(message: str, default: bool = False) -> bool:
 
 
 def render_menu() -> None:
-    print(c("What do you want to do?", BOLD))
+    print(c("  What do you want to do?", BOLD))
     print()
+    current_group = object()
+    title_width = max(len(item.title) for item in MENU_ITEMS)
     for item in MENU_ITEMS:
-        print(f"  {c(item.key, BOLD, CYAN)}) {c(item.title, BOLD)}  {c('— ' + item.blurb, DIM)}")
+        if item.group and item.group != current_group:
+            current_group = item.group
+            print(f"  {c(item.group.upper(), DIM)}")
+        if item.action == "exit":
+            print()
+            print(
+                f"  {c(item.key, BOLD, RED)}) "
+                f"{c(item.title.ljust(title_width), BOLD, RED)}  "
+                f"{c(item.blurb, DIM)}"
+            )
+            continue
+        print(
+            f"  {c(item.key, BOLD, ACCENT)}) "
+            f"{c(item.title.ljust(title_width), BOLD)}  "
+            f"{c(item.blurb, DIM)}"
+        )
     print()
 
 
 def read_menu_choice() -> str | None:
-    raw = prompt("Choose", "1").strip().lower()
-    if raw in {"q", "quit", "exit"}:
+    raw = mug_prompt("1").strip().lower()
+    if raw in {"q", "quit", "exit", "0"}:
         return "exit"
     for item in MENU_ITEMS:
         if raw == item.key or raw == item.action or raw == item.title.lower():

@@ -32,6 +32,7 @@ from .ui import (
     print_guide,
     prompt,
     read_menu_choice,
+    render_home,
     render_menu,
     warn,
 )
@@ -340,15 +341,13 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
 
 
 def run_menu() -> int:
-    banner(__version__)
-    info(f"Working directory: {Path.cwd()}")
-    print()
+    render_home(__version__)
     while True:
         render_menu()
         action = read_menu_choice()
         print()
         if action is None:
-            warn("Unknown choice. Pick a number from the menu.")
+            warn("Unknown choice. Pick a number from the menu (or q to exit).")
             continue
         if action == "exit":
             ok("Bye. Stay fail-closed.")
