@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 - 2026-07-14
+
+Make installs trustworthy and apply git-aware.
+
+- **Verified installer**: defaults to tag `v0.3.1`, downloads release `source.zip`, verifies SHA256 (`MUG_ALLOW_UNVERIFIED=1` escape hatch).
+- **Release assets**: workflow ships `source.zip` + `SHA256SUMS.txt` on every tag.
+- **Git-aware apply**: refuses when original HEAD moved or the tree is dirty (override with `--force`).
+- Workspace registry seals `git_head` when available.
+- Scanner: Vercel, Supabase, Railway, Cloudflare, Firebase assignment, DigitalOcean tokens.
+- Docs: `docs/agent-workflow.md`; SECURITY.md supported-versions table; README install is honest about PyPI.
+- CI: Docker end-to-end smoke (`workspace` → `mug run` → `diff` → `apply --dry-run`).
+- `mug doctor` reports PyPI availability and a correct install hint.
+
 ## 0.3.0 - 2026-07-14
 
 Per-finding baselines, self-update, transactional apply, and an agent-ready sandbox.

@@ -12,6 +12,7 @@ from typing import Callable
 
 from .baseline import load_baseline
 from .config import Config, path_matches
+from .gitaware import git_rev_parse
 from .scanner import blocks_export, scan_tree
 from .utils import (
     MugError,
@@ -88,6 +89,7 @@ def create_workspace(
     workspace_id = uuid.uuid4().hex
     created_at = datetime.now(timezone.utc).isoformat()
     source_digest = _canonical_source_files_digest(hashes)
+    git_head = git_rev_parse(source)
     public_manifest = {
         "format": 2,
         "workspace_id": workspace_id,
@@ -96,6 +98,7 @@ def create_workspace(
         "source_files": hashes,
         "source_files_sha256": source_digest,
         "excluded_count": len(excluded),
+        "git_head": git_head,
     }
     write_json(destination / MANIFEST_NAME, public_manifest)
     (destination / WORKSPACE_ID_NAME).write_text(workspace_id + "\n", encoding="utf-8")
@@ -112,6 +115,7 @@ def create_workspace(
             # Sealed outside the agent-writable workspace. Apply trusts only this copy.
             "source_files": hashes,
             "source_files_sha256": source_digest,
+            "git_head": git_head,
         },
         private=True,
     )
@@ -220,5 +224,6 @@ def resolve_workspace(workspace: Path) -> tuple[Path, Path, dict[str, object]]:
         "source_files": sealed_map,
         "source_files_sha256": expected,
         "excluded_count": public_manifest.get("excluded_count", 0),
+        "git_head": registry.get("git_head"),
     }
     return original, workspace, sealed_manifest

@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import Config, path_matches
+from .gitaware import assert_apply_git_safe
 from .snapshot import create_snapshot
 from .utils import (
     MugError,
@@ -126,7 +127,11 @@ def apply_changes(
         raise MugError("Apply is confirmation-gated. Re-run with --yes after reviewing `mug diff`.")
 
     if not actionable:
-        return {"snapshot": None, "applied": [], "count": 0, "dry_run": dry_run}
+        return {"snapshot": None, "applied": [], "count": 0, "dry_run": dry_run, "git_warnings": []}
+
+    sealed_head = manifest.get("git_head")
+    sealed_head_str = str(sealed_head) if isinstance(sealed_head, str) and sealed_head else None
+    git_warnings = assert_apply_git_safe(original, sealed_head_str, force=force)
 
     if dry_run:
         return {
@@ -134,6 +139,7 @@ def apply_changes(
             "applied": [change.to_dict() for change in actionable],
             "count": len(actionable),
             "dry_run": True,
+            "git_warnings": git_warnings,
         }
 
     snapshot = create_snapshot(original, reason="pre-apply")
@@ -174,7 +180,13 @@ def apply_changes(
     finally:
         shutil.rmtree(backup_root, ignore_errors=True)
 
-    return {"snapshot": str(snapshot), "applied": applied, "count": len(applied), "dry_run": False}
+    return {
+        "snapshot": str(snapshot),
+        "applied": applied,
+        "count": len(applied),
+        "dry_run": False,
+        "git_warnings": git_warnings,
+    }
 
 
 def _journal_record(

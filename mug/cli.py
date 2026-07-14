@@ -87,7 +87,7 @@ def parser() -> argparse.ArgumentParser:
     apply.add_argument("workspace")
     apply.add_argument("--yes", action="store_true", help="Required confirmation")
     apply.add_argument("--allow-delete", action="store_true")
-    apply.add_argument("--force", action="store_true", help="Override change/deletion thresholds")
+    apply.add_argument("--force", action="store_true", help="Override change/deletion thresholds and git dirty/HEAD checks")
     apply.add_argument("--dry-run", action="store_true", help="Show the apply plan without writing")
     apply.add_argument("--json", action="store_true")
 
@@ -345,6 +345,25 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         warnings.append("allow_weaken_defaults=true can remove non-immutable export excludes")
     if config.sandbox_user in {"", "0:0", "root", "0"}:
         warnings.append("sandbox.user runs as root inside the container")
+
+    pypi_available = False
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                "https://pypi.org/pypi/model-upload-guard/json",
+                headers={"User-Agent": f"mug/{__version__}"},
+            ),
+            timeout=5,
+        ) as response:
+            pypi_available = response.status == 200
+    except Exception:
+        pypi_available = False
+    if not pypi_available:
+        # Informational only — do not fail doctor posture until PyPI is live.
+        pass
+
     update_info: dict[str, object] = {"current": __version__, "latest": __version__, "update_available": False}
     try:
         update_info = check_update()
@@ -358,6 +377,7 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         "version": __version__,
         "latest_version": update_info.get("latest"),
         "update_available": update_info.get("update_available"),
+        "pypi_available": pypi_available,
         "python": platform.python_version(),
         "platform": platform.platform(),
         "root": str(root),
@@ -370,6 +390,11 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         "immutable_exclude_count": len(IMMUTABLE_EXCLUDES),
         "warnings": warnings,
         "posture": "hardened" if not warnings and any(engines.values()) else "review",
+        "install_hint": (
+            "pip install model-upload-guard"
+            if pypi_available
+            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 bash"
+        ),
     }
     if as_json:
         print(json.dumps(payload, indent=2))
@@ -386,7 +411,10 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
             else:
                 print(f"{c(str(key), DIM)}: {value}")
         print()
+        info(f"Install: {payload['install_hint']}")
         info("Tip: run `mug` for the interactive menu, or `mug guide` for the workflow.")
+        if not pypi_available:
+            info("PyPI not live yet — use the GitHub verified installer above.")
     if not payload["safe_sandbox_available"]:
         return 1
     return 1 if warnings else 0

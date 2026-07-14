@@ -2,43 +2,47 @@
 
 Repository: `Amaraciuri/model-upload-guard`
 
-## Release (tag → GitHub + PyPI)
+## Release checklist (definitive)
 
 1. Bump `version` in `pyproject.toml` and `mug/__init__.py`.
-2. Update `CHANGELOG.md`.
-3. Commit, tag, push:
+2. Update `CHANGELOG.md` and README install pin (`MUG_REF=…`).
+3. Commit and push `main`.
+4. Tag and push:
 
 ```bash
-git tag -a v0.3.0 -m "Model Upload Guard v0.3.0"
-git push origin main v0.3.0
+git tag -a v0.3.1 -m "Model Upload Guard v0.3.1"
+git push origin main v0.3.1
 ```
 
-The `release` workflow (`.github/workflows/release.yml`) on tag push:
+5. Confirm the **release** workflow produced:
+   - GitHub Release with `source.zip`, wheels, `SHA256SUMS.txt`
+   - Optional PyPI publish (Trusted Publishing)
 
-- builds sdist + wheel;
-- writes `SHA256SUMS.txt`;
-- creates a GitHub Release with artifacts;
-- publishes to PyPI via Trusted Publishing (when configured).
+6. Verify install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 bash
+mug --version   # 0.3.1
+```
+
+## GitHub repo hygiene (one-time)
+
+- Settings → Code security → enable **private vulnerability reporting**
+- Settings → Branches → protect `main` (require `test` + `lint` checks)
+- Settings → General → disable force-push to default branch
 
 ## PyPI Trusted Publishing (one-time)
 
-1. Create the project at https://pypi.org/manage/projects/ (name: `model-upload-guard`).
-2. Add a Trusted Publisher: GitHub → `Amaraciuri/model-upload-guard` → workflow `release.yml` → environment `pypi` (optional).
-3. Push a tag; the workflow publishes automatically.
+1. Create project `model-upload-guard` on https://pypi.org
+2. Add Trusted Publisher: GitHub → `Amaraciuri/model-upload-guard` → workflow `release.yml`
+3. Next tagged release publishes automatically
 
-Until PyPI is configured, the publish step is `continue-on-error: true` so GitHub releases still succeed.
+Until PyPI is configured, the publish step is `continue-on-error: true` so GitHub releases still succeed. README and `mug doctor` prefer GitHub installs while PyPI returns 404.
 
-## Manual PyPI publish (fallback)
+## Manual PyPI fallback
 
 ```bash
 python -m pip install build twine
 python -m build
 twine upload dist/*
 ```
-
-## Before announcing publicly
-
-- Enable GitHub secret scanning and push protection where available.
-- Enable branch protection for `main` (require `test` workflow).
-- Enable private vulnerability reporting.
-- Pin installer examples to a release tag, not `main`.

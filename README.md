@@ -16,12 +16,12 @@
 [![test](https://github.com/Amaraciuri/model-upload-guard/actions/workflows/test.yml/badge.svg)](https://github.com/Amaraciuri/model-upload-guard/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-3776ab?logo=python&logoColor=white)](./pyproject.toml)
-[![PyPI](https://img.shields.io/pypi/v/model-upload-guard?color=3776ab&label=pypi)](https://pypi.org/project/model-upload-guard/)
+[![Release](https://img.shields.io/github/v/release/Amaraciuri/model-upload-guard?include_prereleases&label=release)](https://github.com/Amaraciuri/model-upload-guard/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-27a644.svg)](./CONTRIBUTING.md)
 
-[Quickstart](#quickstart) · [What it answers](#the-questions-your-workflow-cant-answer-today) ·
-[How it works](#how-it-works) · [Compare](#how-it-compares) · [Commands](#commands) ·
-[Security](./SECURITY.md) · [Changelog](./CHANGELOG.md)
+[Quickstart](#quickstart) · [Install](#install) · [What it answers](#the-questions-your-workflow-cant-answer-today) ·
+[How it works](#how-it-works) · [Agent workflow](./docs/agent-workflow.md) · [Compare](#how-it-compares) ·
+[Commands](#commands) · [Security](./SECURITY.md) · [Changelog](./CHANGELOG.md)
 
 </div>
 
@@ -33,21 +33,59 @@ AI coding tools are useful — and dangerous by default: they can upload `.env` 
 
 > Free & MIT. Stdlib-only runtime. Security-focused alpha — review every diff.
 
+## Install
+
+**Verified installer (recommended):** downloads the GitHub Release `source.zip` and checks SHA256.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 bash
+mug --version
+```
+
+If the release assets are still propagating, allow an unverified archive of that tag (audit the tag first):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.1/install.sh | MUG_REF=v0.3.1 MUG_ALLOW_UNVERIFIED=1 bash
+```
+
+**From a local clone:**
+
+```bash
+git clone https://github.com/Amaraciuri/model-upload-guard.git
+cd model-upload-guard
+./install.sh
+```
+
+**Manual verified install:**
+
+```bash
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.1/source.zip
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.1/SHA256SUMS.txt
+# macOS: shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+# Linux: sha256sum -c SHA256SUMS.txt --ignore-missing
+pip install source.zip
+```
+
+**PyPI** (`pip install model-upload-guard`) is enabled when Trusted Publishing is configured; until then prefer the commands above. `mug doctor` tells you which path is live.
+
+Update:
+
+```bash
+mug update --check
+mug update
+```
+
 ## Quickstart
 
 ```bash
-pip install model-upload-guard   # or: pipx install model-upload-guard
 cd your-project
-mug                              # interactive menu — or follow below
-```
-
-```bash
+mug                              # interactive menu — or:
 mug init
 mug scan
 mug pack . -o safe-for-ai.zip    # upload only this ZIP, never the raw repo
 ```
 
-For a coding agent (Claude Code, Codex, Cursor, Gemini CLI, …):
+For a coding agent (Claude Code, Codex, Cursor, Gemini CLI, …) see **[docs/agent-workflow.md](./docs/agent-workflow.md)**:
 
 ```bash
 mug workspace . -o ../project-ai-workspace
@@ -64,25 +102,9 @@ That's the whole loop: **scan → export or workspace → review → apply**.
 | Piece | Needed for | Without it |
 |---|---|---|
 | **Python ≥ 3.11** | everything | (required) |
-| **pip / pipx** or **curl installer** | install & update | clone + `./install.sh` |
+| **curl/wget** | remote installer | local clone |
 | **Docker or Podman** | `mug run` (sandbox) | pack, workspace, scan, diff, apply still work |
-| **git** | gitignored-export warnings | scan still works; no `gitignored-file` hints |
-
-Install options:
-
-```bash
-pip install model-upload-guard                    # PyPI
-pipx install model-upload-guard                   # isolated CLI
-curl -fsSL .../install.sh | MUG_REF=v0.3.0 bash  # shell installer
-```
-
-Update:
-
-```bash
-mug update --check
-mug update
-# or: pip install --upgrade model-upload-guard
-```
+| **git** | dirty/HEAD apply checks + gitignore warnings | apply still works; less context |
 
 ## The questions your workflow can't answer today
 

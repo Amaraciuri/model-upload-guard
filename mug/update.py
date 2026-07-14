@@ -81,18 +81,28 @@ def check_update() -> dict[str, object]:
 
 
 def self_update(ref: str | None = None) -> dict[str, object]:
-    target = ref or latest_tag() or "main"
-    url = f"https://github.com/{_repo()}/archive/{target}.zip"
+    target = ref or latest_tag() or "v0.3.1"
+    # Prefer checksum-backed release assets when available.
+    source_url = f"https://github.com/{_repo()}/releases/download/{target}/source.zip"
+    archive_url = f"https://github.com/{_repo()}/archive/{target}.zip"
+    install_url = archive_url
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(source_url, headers={"User-Agent": f"mug/{__version__}"}),
+            timeout=10,
+        ) as response:
+            if 200 <= int(getattr(response, "status", 200)) < 300:
+                install_url = source_url
+    except (urllib.error.URLError, OSError, ValueError):
+        install_url = archive_url
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", url],
+        [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", install_url],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
-        raise MugError(f"Update failed for {url}:\n{detail}")
-    # Query the freshly installed code in a new interpreter; this process
-    # keeps running the old version until restarted.
+        raise MugError(f"Update failed for {install_url}:\n{detail}")
     version_probe = subprocess.run(
         [sys.executable, "-m", "mug", "--version"],
         capture_output=True,
@@ -103,4 +113,5 @@ def self_update(ref: str | None = None) -> dict[str, object]:
         "previous": __version__,
         "installed": new_version or "unknown",
         "ref": target,
+        "source": install_url,
     }
