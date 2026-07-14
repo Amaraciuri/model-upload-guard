@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -9,11 +10,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config, path_matches
-from .scanner import Finding, blocks_export, scan_tree
+from .scanner import blocks_export, scan_tree
 from .utils import MugError, copy_mode, iter_regular_files, sha256_file, state_dir, write_json
 
 MANIFEST_NAME = ".mug-manifest.json"
 WORKSPACE_ID_NAME = ".mug-id"
+
+
+def _canonical_source_files_digest(source_files: dict[str, str]) -> str:
+    payload = json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def build_manifest(root: Path, config: Config) -> tuple[dict[str, str], list[str]]:
@@ -37,8 +43,10 @@ def create_workspace(source: Path, destination: Path, config: Config, allow_find
 
     hashes, excluded = build_manifest(source, config)
     findings = scan_tree(source, config)
-    if blocks_export(findings, config.fail_on) and not allow_findings:
-        raise MugError("Secret-like content was detected. Review `mug scan` or pass --allow-findings explicitly.")
+    if blocks_export(findings, config.fail_on, config.fail_on_unscanned) and not allow_findings:
+        raise MugError(
+            "Secret-like or unscanned content was detected. Review `mug scan` or pass --allow-findings explicitly."
+        )
     destination.mkdir(parents=True, exist_ok=True)
     for rel, source_path in iter_regular_files(source):
         if rel not in hashes:
@@ -52,12 +60,14 @@ def create_workspace(source: Path, destination: Path, config: Config, allow_find
 
     workspace_id = uuid.uuid4().hex
     created_at = datetime.now(timezone.utc).isoformat()
+    source_digest = _canonical_source_files_digest(hashes)
     public_manifest = {
-        "format": 1,
+        "format": 2,
         "workspace_id": workspace_id,
         "project_name": source.name,
         "created_at": created_at,
         "source_files": hashes,
+        "source_files_sha256": source_digest,
         "excluded_count": len(excluded),
     }
     write_json(destination / MANIFEST_NAME, public_manifest)
@@ -67,10 +77,14 @@ def create_workspace(source: Path, destination: Path, config: Config, allow_find
     write_json(
         registry,
         {
+            "format": 2,
             "workspace_id": workspace_id,
             "source_root": str(source),
             "workspace_root": str(destination),
             "created_at": created_at,
+            # Sealed outside the agent-writable workspace. Apply trusts only this copy.
+            "source_files": hashes,
+            "source_files_sha256": source_digest,
         },
         private=True,
     )
@@ -88,8 +102,8 @@ def create_pack(source: Path, output: Path, config: Config, allow_findings: bool
     output = output.expanduser().resolve()
     hashes, excluded = build_manifest(source, config)
     findings = scan_tree(source, config)
-    if blocks_export(findings, config.fail_on) and not allow_findings:
-        raise MugError("Secret-like content was detected. Export stopped. Review `mug scan`.")
+    if blocks_export(findings, config.fail_on, config.fail_on_unscanned) and not allow_findings:
+        raise MugError("Secret-like or unscanned content was detected. Export stopped. Review `mug scan`.")
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise MugError(f"Output already exists: {output}")
@@ -102,10 +116,11 @@ def create_pack(source: Path, output: Path, config: Config, allow_findings: bool
                         raise MugError(f"Source changed during ZIP creation: {rel}. Re-run the command.")
                     archive.write(source_path, arcname=f"{source.name}/{rel}")
             export_manifest = {
-                "format": 1,
+                "format": 2,
                 "project_name": source.name,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "files": hashes,
+                "files_sha256": _canonical_source_files_digest(hashes),
                 "excluded_count": len(excluded),
             }
             archive.writestr(f"{source.name}/MUG_EXPORT_MANIFEST.json", json.dumps(export_manifest, indent=2) + "\n")
@@ -127,6 +142,8 @@ def resolve_workspace(workspace: Path) -> tuple[Path, Path, dict[str, object]]:
     if not manifest_path.exists() or not id_path.exists():
         raise MugError(f"Not a Model Upload Guard workspace: {workspace}")
     workspace_id = id_path.read_text(encoding="utf-8").strip()
+    if not workspace_id or any(ch for ch in workspace_id if ch not in "0123456789abcdef"):
+        raise MugError("Workspace id is invalid")
     registry_path = state_dir() / "workspaces" / f"{workspace_id}.json"
     if not registry_path.exists():
         raise MugError("Workspace registry is missing. Recreate the workspace from the original repository.")
@@ -135,5 +152,34 @@ def resolve_workspace(workspace: Path) -> tuple[Path, Path, dict[str, object]]:
     registered_workspace = Path(str(registry["workspace_root"])).expanduser().resolve()
     if registered_workspace != workspace:
         raise MugError("Workspace path does not match its local registry")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return original, workspace, manifest
+
+    sealed_files = registry.get("source_files")
+    sealed_digest = registry.get("source_files_sha256")
+    if not isinstance(sealed_files, dict) or not sealed_files:
+        raise MugError("Workspace registry is missing sealed source file hashes. Recreate the workspace.")
+    sealed_map = {str(key): str(value) for key, value in sealed_files.items()}
+    expected = _canonical_source_files_digest(sealed_map)
+    if sealed_digest != expected:
+        raise MugError("Workspace registry seal is corrupted. Recreate the workspace.")
+
+    # Prefer sealed registry data over the agent-writable workspace manifest.
+    public_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    public_files = public_manifest.get("source_files")
+    if isinstance(public_files, dict):
+        public_map = {str(key): str(value) for key, value in public_files.items()}
+        if public_map != sealed_map:
+            raise MugError(
+                "Workspace manifest was tampered with. Apply uses only the sealed local registry; "
+                "recreate the workspace from the original repository."
+            )
+
+    sealed_manifest = {
+        "format": int(registry.get("format", 2)),
+        "workspace_id": workspace_id,
+        "project_name": str(public_manifest.get("project_name", original.name)),
+        "created_at": str(registry.get("created_at", "")),
+        "source_files": sealed_map,
+        "source_files_sha256": expected,
+        "excluded_count": public_manifest.get("excluded_count", 0),
+    }
+    return original, workspace, sealed_manifest

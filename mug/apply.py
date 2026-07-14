@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import difflib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .config import Config, path_matches
 from .snapshot import create_snapshot
-from .utils import MugError, atomic_write, iter_regular_files, safe_join, sha256_file
+from .utils import MugError, atomic_write, iter_regular_files, is_binary, safe_join, sha256_file
 from .workspace import MANIFEST_NAME, WORKSPACE_ID_NAME, resolve_workspace
 
 
@@ -14,12 +15,16 @@ class Change:
     action: str
     path: str
     reason: str = ""
+    patch: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return asdict(self)
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        if payload.get("patch") is None:
+            payload.pop("patch", None)
+        return payload
 
 
-def compute_changes(workspace: Path, config: Config) -> tuple[Path, list[Change], dict[str, object]]:
+def compute_changes(workspace: Path, config: Config, *, include_patches: bool = False) -> tuple[Path, list[Change], dict[str, object]]:
     original, workspace, manifest = resolve_workspace(workspace)
     source_files = manifest.get("source_files", {})
     if not isinstance(source_files, dict):
@@ -56,19 +61,23 @@ def compute_changes(workspace: Path, config: Config) -> tuple[Path, list[Change]
         elif current_original_hash != exported_hash:
             changes.append(Change("blocked", rel, "Conflict: original file changed after workspace creation"))
         else:
-            changes.append(Change("modify", rel, "Content differs from exported source"))
+            patch = _unified_patch(original_path, work_path, rel) if include_patches else None
+            changes.append(Change("modify", rel, "Content differs from exported source", patch=patch))
 
     for rel in sorted(set(workspace_files) - set(source_files)):
         original_path = safe_join(original, rel)
+        work_path = workspace_files[rel]
         if original_path.exists() or original_path.is_symlink():
             changes.append(Change("blocked", rel, "Conflict: path was created in the original repository"))
         else:
-            changes.append(Change("add", rel, "New file in workspace"))
+            patch = _unified_patch(None, work_path, rel) if include_patches else None
+            changes.append(Change("add", rel, "New file in workspace", patch=patch))
 
     for change in changes:
         if path_matches(change.path, config.protected):
             change.action = "blocked"
             change.reason = "Protected path cannot be changed through a workspace"
+            change.patch = None
     return original, changes, manifest
 
 
@@ -79,8 +88,9 @@ def apply_changes(
     yes: bool,
     allow_delete: bool,
     force: bool,
+    dry_run: bool = False,
 ) -> dict[str, object]:
-    original, changes, manifest = compute_changes(workspace, config)
+    original, changes, manifest = compute_changes(workspace, config, include_patches=False)
     blocked = [change for change in changes if change.action == "blocked"]
     actionable = [change for change in changes if change.action != "blocked"]
     if blocked:
@@ -100,15 +110,23 @@ def apply_changes(
         raise MugError(
             f"Deletion ratio {delete_ratio:.1%} exceeds configured maximum {config.max_delete_ratio:.1%}."
         )
-    if not yes:
+    if not yes and not dry_run:
         raise MugError("Apply is confirmation-gated. Re-run with --yes after reviewing `mug diff`.")
 
     if not actionable:
-        return {"snapshot": None, "applied": [], "count": 0}
+        return {"snapshot": None, "applied": [], "count": 0, "dry_run": dry_run}
+
+    if dry_run:
+        return {
+            "snapshot": None,
+            "applied": [change.to_dict() for change in actionable],
+            "count": len(actionable),
+            "dry_run": True,
+        }
 
     snapshot = create_snapshot(original, reason="pre-apply")
     _, resolved_workspace, _ = resolve_workspace(workspace)
-    applied: list[dict[str, str]] = []
+    applied: list[dict[str, object]] = []
     for change in actionable:
         destination = safe_join(original, change.path)
         if change.action in {"add", "modify"}:
@@ -124,7 +142,34 @@ def apply_changes(
             _remove_empty_parents(destination.parent, original)
         applied.append(change.to_dict())
 
-    return {"snapshot": str(snapshot), "applied": applied, "count": len(applied)}
+    return {"snapshot": str(snapshot), "applied": applied, "count": len(applied), "dry_run": False}
+
+
+def _unified_patch(original: Path | None, workspace_file: Path, rel: str) -> str | None:
+    if workspace_file.is_symlink() or (original is not None and original.is_symlink()):
+        return None
+    if is_binary(workspace_file) or (original is not None and original.exists() and is_binary(original)):
+        return f"Binary file differs: {rel}\n"
+    try:
+        new_text = workspace_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        old_text = (
+            original.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            if original is not None and original.exists()
+            else []
+        )
+    except OSError:
+        return None
+    diff = difflib.unified_diff(
+        old_text,
+        new_text,
+        fromfile=f"a/{rel}",
+        tofile=f"b/{rel}",
+        lineterm="",
+    )
+    rendered = "\n".join(diff)
+    if not rendered:
+        return None
+    return rendered + "\n"
 
 
 def _remove_empty_parents(current: Path, root: Path) -> None:

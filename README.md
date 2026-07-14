@@ -4,7 +4,7 @@
 
 `mug` does not try to make an AI model trustworthy. It reduces what the model can see, limits where an agent can write, blocks dangerous change sets, and creates a recovery point before anything touches the original project.
 
-> Status: security-focused alpha. Use defense in depth, keep source control enabled, and review every diff.
+> Status: security-focused alpha (**v0.2.0** fail-closed). Free/MIT. Use defense in depth, keep source control enabled, and review every diff.
 
 ## Why this exists
 
@@ -100,6 +100,7 @@ After the agent finishes:
 
 ```bash
 mug diff ../project-ai-workspace
+mug apply ../project-ai-workspace --dry-run
 mug apply ../project-ai-workspace --yes
 ```
 
@@ -121,8 +122,8 @@ Before applying, `mug` creates a private local recovery snapshot. Protected file
 | `mug workspace` | Create a sanitized linked working copy |
 | `mug run` | Run a command inside Docker/Podman isolation |
 | `mug guard` | Preflight a command for obvious destructive patterns |
-| `mug diff` | Show added, modified, deleted, and blocked files |
-| `mug apply` | Snapshot and apply a reviewed change set |
+| `mug diff` | Show path changes plus unified patches |
+| `mug apply` | Snapshot and apply a reviewed change set (`--dry-run` supported) |
 | `mug snapshot` | Create a private local recovery archive |
 | `mug snapshots` | List recovery archives for a project |
 | `mug restore` | Restore an archive into a new empty directory |
@@ -132,23 +133,33 @@ Machine-readable output is available through `--json` on the main inspection com
 
 ## Configuration
 
-Run `mug init`, then edit `.mug.toml`:
+Run `mug init`, then edit `.mug.toml`.
+
+Security posture is fail-closed:
+
+- immutable secret/credential patterns are always enforced and cannot be removed;
+- `exclude` / `protected` keys only **add** patterns (a short list can no longer drop defaults);
+- unscanned binary/large files block export by default;
+- sandbox network requires both `sandbox.network = true` and `mug run --allow-network`.
 
 ```toml
 [scan]
 max_file_bytes = 1048576
 fail_on = "high"
+fail_on_unscanned = true
+entropy_threshold = 4.5
+entropy_min_length = 32
 
 [export]
-exclude = [
-  ".git", ".env", ".env.*", "*.pem", "*.key",
-  "node_modules", "vendor", "dist", "build"
-]
+exclude_add = ["private/", "*.local.json"]
+exclude_remove = []
+allow_weaken_defaults = false
 
 [apply]
 max_changes = 200
 max_delete_ratio = 0.05
-protected = [".git", ".git/**", ".env", ".env.*", "*.pem", "*.key"]
+protected_add = []
+protected_remove = []
 
 [sandbox]
 engine = "auto"
@@ -157,9 +168,11 @@ network = false
 memory = "2g"
 cpus = "2"
 pids_limit = 256
+user = "65534:65534"
+read_only_root = true
 ```
 
-Project configuration should override user-wide defaults stored at `~/.config/mug/config.toml`.
+Project configuration merges over user-wide defaults stored at `~/.config/mug/config.toml`.
 
 ## Typical integrations
 
@@ -188,7 +201,10 @@ network = false
 mug run ../project-ai-workspace -- my-agent
 ```
 
-Network is disabled by default. Enabling it allows code and prompts inside the sandbox to communicate externally, so treat that as a material security decision.
+Network is disabled by default. Enabling it is a dual-gated material security decision:
+
+1. set `sandbox.network = true` in `.mug.toml`
+2. pass `--allow-network` on `mug run`
 
 ### Pairing with Destructive Command Guard
 
@@ -204,19 +220,23 @@ Neither layer makes arbitrary code safe. Together they reduce different failure 
 ### `mug` is designed to reduce
 
 - accidental upload of common secret files;
-- common hard-coded credentials in text files;
+- common hard-coded credentials and high-entropy secret-like blobs in text files;
+- silent export of unscanned binary/large files;
+- accidental weakening of exclude/protected defaults via short config lists;
 - exposure of Git internals and unrelated home-directory content;
 - direct writes from an agent to the original repository;
+- workspace-manifest tampering during diff/apply (sealed local registry);
 - accidental mass deletion in returned changes;
 - modification of protected paths;
 - irrecoverable apply operations without a local snapshot;
-- obvious destructive commands launched through `mug run`.
+- obvious destructive commands launched through `mug run`;
+- accidental sandbox network enablement without dual confirmation.
 
 ### `mug` does not guarantee protection from
 
-- unknown secret formats or secrets hidden in binaries, images, archives, generated code, or files over the scan limit;
+- unknown secret formats or secrets carefully hidden to evade entropy/heuristics;
 - malicious or vulnerable container images, kernels, runtimes, IDE extensions, browser extensions, or operating systems;
-- a user manually mounting sensitive host paths or enabling network access;
+- a user manually mounting sensitive host paths or dual-confirming network access;
 - an agent executed directly on the host outside `mug`;
 - supply-chain attacks in dependencies installed inside or outside the sandbox;
 - data already committed to Git history or already uploaded elsewhere;
@@ -229,14 +249,16 @@ Review diffs, use Git, protect credentials at the provider level, use short-live
 
 Security controls are intentionally inconvenient to bypass:
 
-- secret-like findings block export unless `--allow-findings` is explicitly supplied;
-- apply requires `--yes`;
+- secret-like and unscanned findings block export unless `--allow-findings` is explicitly supplied;
+- immutable exclude/protected patterns cannot be removed;
+- apply requires `--yes` (use `--dry-run` first);
 - deletions additionally require `--allow-delete`;
 - high-volume changes and excessive deletion ratios require `--force`;
 - protected-path changes cannot be forced;
+- sandbox network requires config + `--allow-network`;
 - missing Docker/Podman produces an error rather than direct host execution.
 
-`--allow-findings` and `--force` are audit signals, not proof of safety.
+`--allow-findings`, `--force`, and `--allow-network` are audit signals, not proof of safety.
 
 ## Recovery
 
@@ -262,13 +284,13 @@ python -m unittest discover -s tests -v
 python -m mug --version
 ```
 
-The regression suite includes the `.env` path-normalization case, sensitive-file exclusion, content scanning, confirmation gates, deletion refusal, protected-path refusal, and pre-apply snapshot behavior.
+The regression suite includes path normalization, fail-closed config merge, unscanned-binary refusal, manifest tamper detection, unified diffs, confirmation gates, deletion refusal, protected-path refusal, and pre-apply snapshot behavior.
 
 ## Roadmap
 
 - signed release artifacts and checksum verification;
 - native Windows PowerShell installer;
-- richer entropy-based secret scanning with allowlisted test fixtures;
+- richer allowlists for intentional test fixtures;
 - OCI image profiles for popular coding agents;
 - Git-aware patch export and three-way apply;
 - optional integration adapters for agent hook systems;

@@ -19,14 +19,14 @@ gh repo create Amaraciuri/model-upload-guard \
   --remote origin \
   --push
 
-git push origin v0.1.0
+git push origin v0.2.0
 ```
 
-Create the first release:
+Create the release:
 
 ```bash
-gh release create v0.1.0 \
-  --title "Model Upload Guard v0.1.0" \
+gh release create v0.2.0 \
+  --title "Model Upload Guard v0.2.0" \
   --notes-file CHANGELOG.md
 ```
 
@@ -39,7 +39,7 @@ gh release create v0.1.0 \
 ```bash
 git remote add origin git@github.com:Amaraciuri/model-upload-guard.git
 git push -u origin main
-git push origin v0.1.0
+git push origin v0.2.0
 ```
 
 ## Before announcing it publicly

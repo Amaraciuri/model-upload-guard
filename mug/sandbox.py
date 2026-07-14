@@ -21,6 +21,9 @@ DANGEROUS_COMMANDS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bterraform\s+destroy\b", re.I), "Terraform destroy removes infrastructure"),
     (re.compile(r"\bmkfs(?:\.|\s)|\bdd\s+[^\n]*of=/dev/", re.I), "Disk formatting or raw device write"),
     (re.compile(r"\bchmod\s+-R\s+777\s+/", re.I), "Recursive permission change on filesystem root"),
+    (re.compile(r"/var/run/docker\.sock|docker\.sock", re.I), "Docker socket access can escape the sandbox"),
+    (re.compile(r"\bcurl\b[^\n]*\|\s*(?:ba)?sh\b", re.I), "Piping remote content into a shell"),
+    (re.compile(r"\bwget\b[^\n]*\|\s*(?:ba)?sh\b", re.I), "Piping remote content into a shell"),
 ]
 
 
@@ -42,7 +45,14 @@ def choose_engine(config: Config) -> str:
     raise MugError("No Docker or Podman installation found. MUG refuses an unsafe host fallback.")
 
 
-def run_sandbox(workspace: Path, command: list[str], config: Config, interactive: bool = False) -> int:
+def run_sandbox(
+    workspace: Path,
+    command: list[str],
+    config: Config,
+    interactive: bool = False,
+    *,
+    allow_network: bool = False,
+) -> int:
     if not command:
         raise MugError("No command supplied after --")
     _, workspace, _ = resolve_workspace(workspace)
@@ -51,12 +61,27 @@ def run_sandbox(workspace: Path, command: list[str], config: Config, interactive
     if reasons:
         raise MugError("Command blocked before sandbox launch: " + "; ".join(reasons))
 
+    # Dual gate: config opt-in AND explicit CLI flag. Network is off by default.
+    network_enabled = False
+    if allow_network:
+        if not config.sandbox_network:
+            raise MugError(
+                "Refusing --allow-network because sandbox.network is false. "
+                "Enabling network is a material security decision: set sandbox.network = true in .mug.toml "
+                "and pass --allow-network."
+            )
+        network_enabled = True
+    elif config.sandbox_network:
+        raise MugError(
+            "sandbox.network = true requires an explicit --allow-network flag on `mug run` "
+            "(dual confirmation for exfiltration risk)."
+        )
+
     engine = choose_engine(config)
     args = [
         engine,
         "run",
         "--rm",
-        "--read-only",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         f"--pids-limit={config.sandbox_pids_limit}",
@@ -67,7 +92,14 @@ def run_sandbox(workspace: Path, command: list[str], config: Config, interactive
         f"type=bind,src={workspace},dst=/workspace,rw",
         "--workdir=/workspace",
     ]
-    if not config.sandbox_network:
+    if config.sandbox_read_only_root:
+        args.append("--read-only")
+    if config.sandbox_user:
+        args.extend(["--user", config.sandbox_user])
+    if network_enabled:
+        # Still no host network aliasing; use default bridge only when dual-gated.
+        pass
+    else:
         args.extend(["--network=none"])
     if interactive:
         args.append("-it")

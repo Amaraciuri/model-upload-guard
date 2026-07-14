@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -10,6 +12,9 @@ from .utils import is_binary, iter_regular_files
 
 
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
+# Findings that never block export (file is excluded from pack/workspace anyway).
+NON_BLOCKING_RULES = frozenset({"sensitive-filename"})
 
 
 @dataclass(slots=True)
@@ -27,23 +32,36 @@ class Finding:
 
 CONTENT_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
     ("critical", "private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"), "Private key material"),
+    ("critical", "pgp-private-key", re.compile(r"-----BEGIN PGP PRIVATE KEY BLOCK-----"), "PGP private key material"),
     ("critical", "aws-secret", re.compile(r"(?i)aws_secret_access_key\s*[:=]\s*['\"]?[A-Za-z0-9/+=]{32,}"), "AWS secret access key"),
     ("high", "aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "AWS access key ID"),
     ("high", "github-token", re.compile(r"\bgh(?:p|o|u|s|r)_[A-Za-z0-9]{30,255}\b"), "GitHub token"),
+    ("high", "github-pat-fine", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "GitHub fine-grained PAT"),
     ("high", "openai-key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"), "OpenAI-style API key"),
     ("high", "anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"), "Anthropic API key"),
     ("high", "xai-key", re.compile(r"\bxai-[A-Za-z0-9_-]{20,}\b"), "xAI API key"),
-    ("high", "groq-key", re.compile(r"\bgsk_[A-Za-z0-9_-]{20,}\b"), "Groq API key"),
+    ("high", "groq-key", re.compile(r"\bgsk_[A-Za-z0-9_]{20,}\b"), "Groq API key"),
     ("high", "huggingface-token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "Hugging Face token"),
     ("high", "gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"), "GitLab token"),
     ("high", "npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), "npm access token"),
     ("high", "google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"), "Google API key"),
     ("high", "slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
+    ("high", "slack-webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "Slack webhook URL"),
     ("high", "stripe-secret", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "Stripe secret key"),
+    ("high", "telegram-bot", re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b"), "Telegram bot token"),
+    ("high", "discord-token", re.compile(r"\b[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b"), "Discord bot token"),
+    ("high", "azure-storage-key", re.compile(r"(?i)AccountKey=[A-Za-z0-9+/=]{40,}"), "Azure storage account key"),
+    ("high", "sendgrid-key", re.compile(r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"), "SendGrid API key"),
+    ("high", "twilio-sid", re.compile(r"\bAC[a-f0-9]{32}\b"), "Twilio account SID"),
     ("high", "jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "JSON Web Token"),
-    ("high", "database-url", re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^\s:@/]+:[^\s@/]+@"), "Database URL with embedded credentials"),
+    ("high", "bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{20,}\b"), "Bearer token"),
+    ("high", "database-url", re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp|rediss)://[^\s:@/]+:[^\s@/]+@"), "Database URL with embedded credentials"),
+    ("high", "generic-api-assignment", re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|private[_-]?key)\b\s*[:=]\s*['\"][^'\"\n]{12,}['\"]"), "Hard-coded API credential assignment"),
     ("medium", "password-assignment", re.compile(r"(?i)\b(?:password|passwd|pwd|secret|token)\b\s*[:=]\s*['\"][^'\"\n]{8,}['\"]"), "Possible hard-coded credential"),
 ]
+
+# High-entropy token candidates (base64/hex-ish blobs).
+ENTROPY_CANDIDATE = re.compile(r"""(?:"|'|=|:|\s|^)([A-Za-z0-9+/=_-]{32,})(?:"|'|\s|$|,|;)""")
 
 SENSITIVE_NAME_PATTERNS = [
     ".env",
@@ -77,26 +95,59 @@ SENSITIVE_NAME_PATTERNS = [
     "secrets.yaml",
 ]
 
+# Paths that often contain intentional high-entropy fixtures; still reported low unless other rules hit.
+ALLOWLIST_PATH_HINTS = (
+    "test",
+    "tests",
+    "spec",
+    "fixtures",
+    "testdata",
+    "mock",
+    "__mocks__",
+)
+
 
 def scan_tree(root: Path, config: Config, include_excluded_names: bool = True) -> list[Finding]:
     findings: list[Finding] = []
     for rel, path in iter_regular_files(root):
         excluded = path_matches(rel, config.exclude)
         if include_excluded_names and path_matches(rel, SENSITIVE_NAME_PATTERNS):
-            findings.append(Finding("high", "sensitive-filename", rel, None, "Sensitive file is present and will be excluded"))
+            findings.append(
+                Finding("high", "sensitive-filename", rel, None, "Sensitive file is present and will be excluded")
+            )
         if excluded:
             continue
-        findings.extend(scan_file(rel, path, config.max_file_bytes))
+        findings.extend(scan_file(rel, path, config))
     return findings
 
 
-def scan_file(rel: str, path: Path, max_file_bytes: int) -> list[Finding]:
+def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
     try:
         size = path.stat().st_size
     except OSError:
         return [Finding("medium", "unreadable-file", rel, None, "File could not be read")]
-    if size > max_file_bytes or is_binary(path):
-        return []
+
+    if is_binary(path):
+        return [
+            Finding(
+                "high",
+                "unscanned-binary",
+                rel,
+                None,
+                "Binary file skipped by content scanner; refused for export by default",
+            )
+        ]
+    if size > config.max_file_bytes:
+        return [
+            Finding(
+                "high",
+                "unscanned-large",
+                rel,
+                None,
+                f"File exceeds scan limit ({config.max_file_bytes} bytes); refused for export by default",
+            )
+        ]
+
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -109,6 +160,57 @@ def scan_file(rel: str, path: Path, max_file_bytes: int) -> list[Finding]:
             if match:
                 excerpt = _redact(line.strip(), match.start(), match.end())
                 findings.append(Finding(severity, rule, rel, line_no, message, excerpt))
+        findings.extend(_entropy_findings(rel, line_no, line, config))
+    return findings
+
+
+def _shannon_entropy(value: str) -> float:
+    if not value:
+        return 0.0
+    counts = Counter(value)
+    length = len(value)
+    return -sum((count / length) * math.log2(count / length) for count in counts.values())
+
+
+def _looks_like_secret_blob(token: str) -> bool:
+    if len(token) < 32:
+        return False
+    has_upper = any(c.isupper() for c in token)
+    has_lower = any(c.islower() for c in token)
+    has_digit = any(c.isdigit() for c in token)
+    # Reject obvious words / paths / uuids-ish low mix.
+    if token.count("-") > max(3, len(token) // 8) and "/" not in token and "+" not in token:
+        return False
+    return (has_digit and (has_upper or has_lower)) or ("+" in token or "/" in token or "_" in token)
+
+
+def _path_looks_like_fixture(rel: str) -> bool:
+    lowered = rel.lower().replace("\\", "/")
+    return any(f"/{hint}/" in f"/{lowered}/" or lowered.startswith(f"{hint}/") for hint in ALLOWLIST_PATH_HINTS)
+
+
+def _entropy_findings(rel: str, line_no: int, line: str, config: Config) -> list[Finding]:
+    findings: list[Finding] = []
+    for match in ENTROPY_CANDIDATE.finditer(line):
+        token = match.group(1)
+        if len(token) < config.entropy_min_length or not _looks_like_secret_blob(token):
+            continue
+        entropy = _shannon_entropy(token)
+        if entropy < config.entropy_threshold:
+            continue
+        severity = "medium" if _path_looks_like_fixture(rel) else "high"
+        start = match.start(1)
+        end = match.end(1)
+        findings.append(
+            Finding(
+                severity,
+                "high-entropy",
+                rel,
+                line_no,
+                f"High-entropy string (entropy={entropy:.2f}); possible secret",
+                _redact(line.strip(), start, end),
+            )
+        )
     return findings
 
 
@@ -120,6 +222,13 @@ def _redact(line: str, start: int, end: int) -> str:
     return line[:safe_start] + "[REDACTED]" + line[safe_end:]
 
 
-def blocks_export(findings: Iterable[Finding], fail_on: str) -> bool:
+def blocks_export(findings: Iterable[Finding], fail_on: str, fail_on_unscanned: bool = True) -> bool:
     threshold = SEVERITY_ORDER[fail_on]
-    return any(SEVERITY_ORDER[finding.severity] >= threshold and finding.rule != "sensitive-filename" for finding in findings)
+    for finding in findings:
+        if finding.rule in NON_BLOCKING_RULES:
+            continue
+        if finding.rule in {"unscanned-binary", "unscanned-large"} and not fail_on_unscanned:
+            continue
+        if SEVERITY_ORDER[finding.severity] >= threshold:
+            return True
+    return False

