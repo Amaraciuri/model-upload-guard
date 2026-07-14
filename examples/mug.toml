@@ -1,0 +1,22 @@
+[scan]
+max_file_bytes = 1048576
+fail_on = "high"
+
+[export]
+exclude = [
+  ".git", ".mug.toml", ".env", ".env.*", "*.pem", "*.key",
+  "node_modules", "vendor", "dist", "build"
+]
+
+[apply]
+max_changes = 200
+max_delete_ratio = 0.05
+protected = [".git", ".git/**", ".mug.toml", ".env", ".env.*", "*.pem", "*.key"]
+
+[sandbox]
+engine = "auto"
+image = "python:3.12-alpine"
+network = false
+memory = "2g"
+cpus = "2"
+pids_limit = 256
