@@ -12,9 +12,11 @@ from unittest.mock import patch
 from mug.apply import apply_changes, compute_changes
 from mug.config import Config, IMMUTABLE_EXCLUDES, load_config, path_matches
 from mug.sandbox import inspect_command
-from mug.scanner import blocks_export, scan_tree
+from mug.scanner import blocks_export, scan_tree, _entropy_findings
 from mug.snapshot import create_snapshot, restore_snapshot
 from mug.utils import MugError, normalize_rel
+from mug.cli import main
+from mug.ui import ProgressBar, read_menu_choice
 from mug.workspace import create_pack, create_workspace, resolve_workspace
 
 
@@ -97,6 +99,52 @@ class ScanAndPackTests(unittest.TestCase):
             self.assertTrue(blocks_export(findings, "high", True))
             with self.assertRaises(MugError):
                 create_pack(root, Path(tmp) / "out.zip", Config())
+
+
+
+class ScannerCalibrationTests(unittest.TestCase):
+    def test_lockfile_integrity_not_high_entropy(self) -> None:
+        line = (
+            '      "integrity": "sha512-'
+            + ("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/" * 4)
+            + '=",'
+        )
+        findings = _entropy_findings("package-lock.json", 12, line, Config())
+        self.assertEqual(findings, [])
+
+    def test_yarn_lock_checksum_not_high_entropy(self) -> None:
+        line = "  checksum: " + ("a1b2c3d4e5f60718293a4b5c6d7e8f90" * 2)
+        findings = _entropy_findings("yarn.lock", 3, line, Config())
+        self.assertEqual(findings, [])
+
+    def test_properties_assignment_not_high_entropy(self) -> None:
+        line = "distributionBase=GRADLE_USER_HOME"
+        findings = _entropy_findings(
+            "android/gradle/wrapper/gradle-wrapper.properties", 1, line, Config()
+        )
+        self.assertEqual(findings, [])
+
+    def test_real_secret_still_flagged(self) -> None:
+
+        line = 'const key = "sk_live_' + ("ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" * 2) + '";'
+        findings = _entropy_findings("src/app.js", 1, line, Config())
+        self.assertTrue(any(item.rule == "high-entropy" for item in findings))
+
+    def test_default_excludes_cover_os_and_tooling_noise(self) -> None:
+        config = Config()
+        for rel in (".DS_Store", ".vexp/manifest.json", ".gradle/caches/x", "src/.idea/workspace.xml"):
+            self.assertTrue(path_matches(rel, config.exclude), rel)
+
+    def test_large_file_message_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            big = root / "engine.js"
+            big.write_bytes(b"x" * (1024 * 1024 + 10))
+            findings = scan_tree(root, Config())
+            large = [item for item in findings if item.rule == "unscanned-large"]
+            self.assertEqual(len(large), 1)
+            self.assertIn("max_file_bytes", large[0].message)
+            self.assertIn("exclude_add", large[0].message)
 
 
 class WorkspaceApplyTests(unittest.TestCase):
@@ -238,3 +286,45 @@ class SnapshotAndGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UiAndProgressTests(unittest.TestCase):
+    def test_guide_command_prints_workflow(self) -> None:
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            code = main(["guide"])
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("mug scan", text)
+        self.assertIn("mug pack", text)
+        self.assertIn("mug apply", text)
+
+    def test_scan_progress_callback_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("print(1)\n", encoding="utf-8")
+            (root / "b.py").write_text("print(2)\n", encoding="utf-8")
+            seen: list[tuple[int, int, str]] = []
+
+            def on_progress(current: int, total: int, detail: str) -> None:
+                seen.append((current, total, detail))
+
+            findings = scan_tree(root, Config(), on_progress=on_progress)
+            self.assertEqual(findings, [])
+            self.assertEqual(len(seen), 2)
+            self.assertEqual(seen[-1][0], seen[-1][1])
+
+    def test_progress_bar_silent_when_not_tty(self) -> None:
+        stream = io.StringIO()
+        bar = ProgressBar("Scan", stream=stream)
+        self.assertFalse(bar.enabled)
+        bar.update(1, 2, "x.py")
+        bar.finish("done")
+        self.assertEqual(stream.getvalue(), "done\n")
+
+    def test_menu_choice_maps_number(self) -> None:
+        with patch("builtins.input", return_value="9"):
+            self.assertEqual(read_menu_choice(), "cheatsheet")
+        with patch("builtins.input", return_value="0"):
+            self.assertEqual(read_menu_choice(), "exit")
+
+

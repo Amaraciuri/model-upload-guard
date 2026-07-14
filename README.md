@@ -4,7 +4,7 @@
 
 `mug` does not try to make an AI model trustworthy. It reduces what the model can see, limits where an agent can write, blocks dangerous change sets, and creates a recovery point before anything touches the original project.
 
-> Status: security-focused alpha (**v0.2.0** fail-closed). Free/MIT. Use defense in depth, keep source control enabled, and review every diff.
+> Status: security-focused alpha (**v0.2.2** fail-closed). Free/MIT. Use defense in depth, keep source control enabled, and review every diff.
 
 ## Why this exists
 
@@ -72,11 +72,14 @@ The installer creates a dedicated virtual environment under `~/.local/share/mode
 Inside a project:
 
 ```bash
+mug                 # interactive menu + quick start
+# or:
 mug init
 mug scan
 mug pack . -o project-for-ai.zip
 ```
 
+Prefer commands? `mug guide` prints the workflow; `mug --help` lists every subcommand.
 The ZIP excludes `.git`, `.env*`, private keys, credential files, local databases, dependencies, build output, and other configured paths. Export stops when secret-like content is detected inside otherwise allowed source files.
 
 For an AI coding agent:
@@ -116,6 +119,8 @@ Before applying, `mug` creates a private local recovery snapshot. Protected file
 
 | Command | Purpose |
 |---|---|
+| `mug` / `mug menu` | Interactive menu and quick-start guide |
+| `mug guide` | Print the typical safe workflow |
 | `mug init` | Write a deny-by-default `.mug.toml` |
 | `mug scan` | Find sensitive filenames and secret-like content |
 | `mug pack` | Create a sanitized ZIP for browser/chat upload |

@@ -5,10 +5,12 @@ import re
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .config import Config, path_matches
 from .utils import is_binary, iter_regular_files
+
+ProgressCb = Callable[[int, int, str], None]
 
 
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -31,8 +33,9 @@ class Finding:
 
 
 CONTENT_RULES: list[tuple[str, str, re.Pattern[str], str]] = [
-    ("critical", "private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"), "Private key material"),
-    ("critical", "pgp-private-key", re.compile(r"-----BEGIN PGP PRIVATE KEY BLOCK-----"), "PGP private key material"),
+    # Use -{5} so this source file does not contain literal PEM headers (self-scan noise).
+    ("critical", "private-key", re.compile(r"-{5}BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-{5}"), "Private key material"),
+    ("critical", "pgp-private-key", re.compile(r"-{5}BEGIN PGP PRIVATE KEY BLOCK-{5}"), "PGP private key material"),
     ("critical", "aws-secret", re.compile(r"(?i)aws_secret_access_key\s*[:=]\s*['\"]?[A-Za-z0-9/+=]{32,}"), "AWS secret access key"),
     ("high", "aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "AWS access key ID"),
     ("high", "github-token", re.compile(r"\bgh(?:p|o|u|s|r)_[A-Za-z0-9]{30,255}\b"), "GitHub token"),
@@ -106,10 +109,62 @@ ALLOWLIST_PATH_HINTS = (
     "__mocks__",
 )
 
+# Dependency lockfiles / checksum manifests: high-entropy by design, not secrets.
+LOCKFILE_BASENAMES = frozenset(
+    {
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "pnpm-lock.yml",
+        "bun.lock",
+        "bun.lockb",
+        "cargo.lock",
+        "poetry.lock",
+        "composer.lock",
+        "gemfile.lock",
+        "go.sum",
+        "go.mod",
+        "pipfile.lock",
+        "uv.lock",
+        "flake.lock",
+        "gradle.lockfile",
+        "package-lock.yaml",
+    }
+)
 
-def scan_tree(root: Path, config: Config, include_excluded_names: bool = True) -> list[Finding]:
+# Lines that are package integrity / checksum fields (npm, yarn, cargo, go.sum, etc.).
+CHECKSUM_LINE = re.compile(
+    r"""(?ix)
+    ^\s*
+    (?:
+        ["']?integrity["']?\s*[:=]
+      | ["']?checksum["']?\s*[:=]
+      | ["']?sha(?:1|256|512)["']?\s*[:=]
+      | hash\s*=
+      | digest\s*=
+    )
+    |
+    \bsha(?:1|256|512)-[A-Za-z0-9+/=_-]{20,}
+    |
+    \bh1:[A-Za-z0-9+/=_-]{20,}
+    """
+)
+
+
+
+def scan_tree(
+    root: Path,
+    config: Config,
+    include_excluded_names: bool = True,
+    on_progress: ProgressCb | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
-    for rel, path in iter_regular_files(root):
+    files = list(iter_regular_files(root))
+    total = len(files)
+    for index, (rel, path) in enumerate(files, start=1):
+        if on_progress is not None:
+            on_progress(index, total, rel)
         excluded = path_matches(rel, config.exclude)
         if include_excluded_names and path_matches(rel, SENSITIVE_NAME_PATTERNS):
             findings.append(
@@ -138,13 +193,17 @@ def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
             )
         ]
     if size > config.max_file_bytes:
+        tip = (
+            "Raise scan.max_file_bytes or add the path to export.exclude_add if it is safe "
+            "source that AI needs; otherwise keep it out of packs/workspaces."
+        )
         return [
             Finding(
                 "high",
                 "unscanned-large",
                 rel,
                 None,
-                f"File exceeds scan limit ({config.max_file_bytes} bytes); refused for export by default",
+                f"File exceeds scan limit ({config.max_file_bytes} bytes); refused for export by default. {tip}",
             )
         ]
 
@@ -175,11 +234,18 @@ def _shannon_entropy(value: str) -> float:
 def _looks_like_secret_blob(token: str) -> bool:
     if len(token) < 32:
         return False
+    # Base64 padding is only trailing '=' / '=='; reject KEY=VALUE-style matches.
+    if "=" in token.rstrip("="):
+        return False
     has_upper = any(c.isupper() for c in token)
     has_lower = any(c.islower() for c in token)
     has_digit = any(c.isdigit() for c in token)
     # Reject obvious words / paths / uuids-ish low mix.
     if token.count("-") > max(3, len(token) // 8) and "/" not in token and "+" not in token:
+        return False
+    # Pure letter identifiers with underscores (config constants) are not secret blobs.
+    core = token.rstrip("=")
+    if core.replace("_", "").isalpha() and not has_digit and "+" not in token and "/" not in token:
         return False
     return (has_digit and (has_upper or has_lower)) or ("+" in token or "/" in token or "_" in token)
 
@@ -189,11 +255,35 @@ def _path_looks_like_fixture(rel: str) -> bool:
     return any(f"/{hint}/" in f"/{lowered}/" or lowered.startswith(f"{hint}/") for hint in ALLOWLIST_PATH_HINTS)
 
 
+def _basename(rel: str) -> str:
+    return rel.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _is_lockfile(rel: str) -> bool:
+    return _basename(rel) in LOCKFILE_BASENAMES
+
+
+def _is_checksum_noise(rel: str, line: str) -> bool:
+    if _is_lockfile(rel):
+        return True
+    if CHECKSUM_LINE.search(line):
+        return True
+    # Gradle wrapper distribution checksums / URL hashes
+    if "gradle" in rel.lower().replace("\\", "/") and "sha256" in line.lower():
+        return True
+    return False
+
+
 def _entropy_findings(rel: str, line_no: int, line: str, config: Config) -> list[Finding]:
+    if _is_checksum_noise(rel, line):
+        return []
     findings: list[Finding] = []
     for match in ENTROPY_CANDIDATE.finditer(line):
         token = match.group(1)
         if len(token) < config.entropy_min_length or not _looks_like_secret_blob(token):
+            continue
+        # npm-style integrity prefixes
+        if token.startswith(("sha256-", "sha512-", "sha1-", "h1:")):
             continue
         entropy = _shannon_entropy(token)
         if entropy < config.entropy_threshold:

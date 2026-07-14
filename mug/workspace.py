@@ -8,6 +8,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from .config import Config, path_matches
 from .scanner import blocks_export, scan_tree
@@ -15,6 +16,7 @@ from .utils import MugError, copy_mode, iter_regular_files, sha256_file, state_d
 
 MANIFEST_NAME = ".mug-manifest.json"
 WORKSPACE_ID_NAME = ".mug-id"
+ProgressCb = Callable[[int, int, str], None]
 
 
 def _canonical_source_files_digest(source_files: dict[str, str]) -> str:
@@ -22,10 +24,18 @@ def _canonical_source_files_digest(source_files: dict[str, str]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def build_manifest(root: Path, config: Config) -> tuple[dict[str, str], list[str]]:
+def build_manifest(
+    root: Path,
+    config: Config,
+    on_progress: ProgressCb | None = None,
+) -> tuple[dict[str, str], list[str]]:
     hashes: dict[str, str] = {}
     excluded: list[str] = []
-    for rel, path in iter_regular_files(root):
+    files = list(iter_regular_files(root))
+    total = len(files)
+    for index, (rel, path) in enumerate(files, start=1):
+        if on_progress is not None:
+            on_progress(index, total, rel)
         if path_matches(rel, config.exclude):
             excluded.append(rel)
             continue
@@ -33,7 +43,13 @@ def build_manifest(root: Path, config: Config) -> tuple[dict[str, str], list[str
     return hashes, excluded
 
 
-def create_workspace(source: Path, destination: Path, config: Config, allow_findings: bool = False) -> dict[str, object]:
+def create_workspace(
+    source: Path,
+    destination: Path,
+    config: Config,
+    allow_findings: bool = False,
+    on_progress: ProgressCb | None = None,
+) -> dict[str, object]:
     source = source.resolve()
     destination = destination.expanduser().resolve()
     if destination == source or source in destination.parents:
@@ -41,16 +57,18 @@ def create_workspace(source: Path, destination: Path, config: Config, allow_find
     if destination.exists() and any(destination.iterdir()):
         raise MugError(f"Workspace destination is not empty: {destination}")
 
-    hashes, excluded = build_manifest(source, config)
-    findings = scan_tree(source, config)
+    hashes, excluded = build_manifest(source, config, on_progress=on_progress)
+    findings = scan_tree(source, config, on_progress=on_progress)
     if blocks_export(findings, config.fail_on, config.fail_on_unscanned) and not allow_findings:
         raise MugError(
             "Secret-like or unscanned content was detected. Review `mug scan` or pass --allow-findings explicitly."
         )
     destination.mkdir(parents=True, exist_ok=True)
-    for rel, source_path in iter_regular_files(source):
-        if rel not in hashes:
-            continue
+    copy_items = [(rel, source / rel) for rel in hashes]
+    total = len(copy_items)
+    for index, (rel, source_path) in enumerate(copy_items, start=1):
+        if on_progress is not None:
+            on_progress(index, total, rel)
         if sha256_file(source_path) != hashes[rel]:
             raise MugError(f"Source changed during workspace creation: {rel}. Re-run the command.")
         target = destination / rel
@@ -97,11 +115,17 @@ def create_workspace(source: Path, destination: Path, config: Config, allow_find
     }
 
 
-def create_pack(source: Path, output: Path, config: Config, allow_findings: bool = False) -> dict[str, object]:
+def create_pack(
+    source: Path,
+    output: Path,
+    config: Config,
+    allow_findings: bool = False,
+    on_progress: ProgressCb | None = None,
+) -> dict[str, object]:
     source = source.resolve()
     output = output.expanduser().resolve()
-    hashes, excluded = build_manifest(source, config)
-    findings = scan_tree(source, config)
+    hashes, excluded = build_manifest(source, config, on_progress=on_progress)
+    findings = scan_tree(source, config, on_progress=on_progress)
     if blocks_export(findings, config.fail_on, config.fail_on_unscanned) and not allow_findings:
         raise MugError("Secret-like or unscanned content was detected. Export stopped. Review `mug scan`.")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -110,11 +134,14 @@ def create_pack(source: Path, output: Path, config: Config, allow_findings: bool
     temp = output.with_suffix(output.suffix + ".tmp")
     try:
         with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-            for rel, source_path in iter_regular_files(source):
-                if rel in hashes:
-                    if sha256_file(source_path) != hashes[rel]:
-                        raise MugError(f"Source changed during ZIP creation: {rel}. Re-run the command.")
-                    archive.write(source_path, arcname=f"{source.name}/{rel}")
+            pack_items = [(rel, source_path) for rel, source_path in iter_regular_files(source) if rel in hashes]
+            total = len(pack_items)
+            for index, (rel, source_path) in enumerate(pack_items, start=1):
+                if on_progress is not None:
+                    on_progress(index, total, rel)
+                if sha256_file(source_path) != hashes[rel]:
+                    raise MugError(f"Source changed during ZIP creation: {rel}. Re-run the command.")
+                archive.write(source_path, arcname=f"{source.name}/{rel}")
             export_manifest = {
                 "format": 2,
                 "project_name": source.name,

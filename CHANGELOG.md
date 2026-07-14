@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.2 - 2026-07-14
+
+Terminal UX: interactive menu, progress bars, and clearer guidance.
+
+- `mug` / `mug menu` open an interactive guide (scan, pack, workspace, diff, apply, …).
+- `mug guide` prints the typical safe workflow; cheat sheet available from the menu.
+- Progress bars on `scan` / `pack` / `workspace` (stderr, TTY-only; disable with `MUG_NO_PROGRESS=1` or `CI=1`).
+- Colorized findings/summary when the terminal supports it (`NO_COLOR=1` to disable).
+
+## 0.2.1 - 2026-07-14
+
+Scanner calibration: quieter false positives, clearer large-file guidance.
+
+- Skip high-entropy findings in dependency lockfiles and checksum/integrity lines (npm, yarn, cargo, go.sum, etc.).
+- Default export excludes add `.DS_Store`, `.vexp`, `.gradle`, IDE junk (`.idea`, `.vscode`), and common editor backups.
+- `mug scan` prints a severity/rule summary plus tips for `unscanned-large` and `high-entropy`.
+- Large-file findings include actionable remediation text.
+- Reject KEY=VALUE-style entropy matches; exclude common audio (`.m4a`, `.ogg`, …) and `.jar` by default.
+
 ## 0.2.0 - 2026-07-14
 
 Hardened fail-closed release for public/self-hosted use (still MIT, no paid features).
