@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3 - 2026-07-16
+
+Team scan rules, agent template, and richer interactive menu.
+
+- **`[[scan.rules_add]]`**: add org/team secret regexes in `.mug.toml` (validated, additive to built-ins).
+- **`scan.allowlist_paths`**: path globs whose findings are marked allowlisted and do not block export (shown separately from baselines).
+- **`examples/AGENTS.md`** + menu **a) Agent rules** — write a fail-closed agent instructions file into the project.
+- Menu UX: clear screen between screens, compact home after first paint, step headers, change preview with **path-by-path deletes** before allowing deletions.
+- README threat model + SECURITY supply-chain checksum guidance; docs link the agent template.
+
 ## 0.3.2 - 2026-07-15
 
 Apply policy visibility and menu navigation.

@@ -94,6 +94,51 @@ class ConfigSecurityTests(unittest.TestCase):
             with self.assertRaises(MugError):
                 load_config(root)
 
+    def test_rules_add_and_allowlist_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".mug.toml").write_text(
+                "\n".join(
+                    [
+                        "[scan]",
+                        'allowlist_paths = ["fixtures/**"]',
+                        "[[scan.rules_add]]",
+                        'severity = "high"',
+                        'rule = "internal-token"',
+                        "pattern = 'myorg_[A-Za-z0-9]{20,}'",
+                        'message = "Internal org token"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(root)
+            self.assertEqual(len(config.rules_add), 1)
+            self.assertEqual(config.rules_add[0].rule, "internal-token")
+            self.assertEqual(config.allowlist_paths, ["fixtures/**"])
+            (root / "app.py").write_text(
+                "const t = 'myorg_abcdefghijklmnopqrst';\n",
+                encoding="utf-8",
+            )
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            (fixtures / "sample.py").write_text(
+                "const t = 'myorg_abcdefghijklmnopqrst';\n",
+                encoding="utf-8",
+            )
+            findings = scan_tree(root, config)
+            custom = [item for item in findings if item.rule == "internal-token"]
+            self.assertEqual(len(custom), 2)
+            allowlisted = [item for item in custom if item.allowlisted]
+            blocking = [item for item in custom if not item.allowlisted]
+            self.assertEqual(len(allowlisted), 1)
+            self.assertEqual(len(blocking), 1)
+            self.assertTrue(blocks_export(findings, "high", True))
+            # Allowlisting the only remaining hit should unblock export.
+            config.allowlist_paths = ["**"]
+            findings = scan_tree(root, config)
+            self.assertFalse(blocks_export(findings, "high", True))
+
 
 class ScanAndPackTests(unittest.TestCase):
     def test_pack_excludes_sensitive_files(self) -> None:
@@ -364,6 +409,8 @@ class UiAndProgressTests(unittest.TestCase):
             self.assertEqual(read_menu_choice(), "exit")
         with patch("builtins.input", return_value="u"):
             self.assertEqual(read_menu_choice(), "update")
+        with patch("builtins.input", return_value="a"):
+            self.assertEqual(read_menu_choice(), "agents")
         with patch("builtins.input", return_value=""):
             self.assertEqual(read_menu_choice(), "home")
         with patch("builtins.input", return_value="b"):

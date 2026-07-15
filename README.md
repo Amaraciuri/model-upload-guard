@@ -38,14 +38,14 @@ AI coding tools are useful — and dangerous by default: they can upload `.env` 
 **Verified installer (recommended):** downloads the GitHub Release `source.zip` and checks SHA256.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.2/install.sh | MUG_REF=v0.3.2 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 bash
 mug --version
 ```
 
 If the release assets are still propagating, allow an unverified archive of that tag (audit the tag first):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.2/install.sh | MUG_REF=v0.3.2 MUG_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 MUG_ALLOW_UNVERIFIED=1 bash
 ```
 
 **From a local clone:**
@@ -59,8 +59,8 @@ cd model-upload-guard
 **Manual verified install:**
 
 ```bash
-curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.2/source.zip
-curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.2/SHA256SUMS.txt
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.3/source.zip
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.3/SHA256SUMS.txt
 # macOS: shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 # Linux: sha256sum -c SHA256SUMS.txt --ignore-missing
 pip install source.zip
@@ -221,6 +221,12 @@ Add `--json` on inspection commands for CI. Progress bars on TTY only (`MUG_NO_P
 [scan]
 fail_on = "high"
 fail_on_unscanned = true
+# allowlist_paths = ["fixtures/**"]
+# [[scan.rules_add]]
+# severity = "high"
+# rule = "internal-token"
+# pattern = 'myorg_[A-Za-z0-9]{20,}'
+# message = "Internal org token"
 
 [export]
 exclude_add = ["private/"]
@@ -234,7 +240,7 @@ read_only_root = true
 home_tmpfs = true        # ephemeral HOME for agent CLIs
 ```
 
-Project `.mug.toml` merges over `~/.config/mug/config.toml`. See [`examples/mug.toml`](./examples/mug.toml).
+Project `.mug.toml` merges over `~/.config/mug/config.toml`. See [`examples/mug.toml`](./examples/mug.toml) and [`examples/AGENTS.md`](./examples/AGENTS.md).
 
 ## Privacy & security, by default
 
@@ -244,7 +250,23 @@ Project `.mug.toml` merges over `~/.config/mug/config.toml`. See [`examples/mug.
 - **Transactional apply** — failed apply rolls back; pre-apply snapshot kept.
 - **No phone-home** — `mug update` runs only when you ask; `doctor` may suggest an update if you run it online.
 
-Honest limitations: [`SECURITY.md`](./SECURITY.md). mug reduces risk; it does not make arbitrary agent code safe.
+## Threat model
+
+mug assumes you want to reduce **accidental** secret export and **unreviewed** writes back into a repo. It helps when:
+
+- You (or an agent) might upload a ZIP that still contains `.env` / keys.
+- An agent edits a sanitized workspace and you want a gate before touching the real tree.
+
+mug does **not** protect against:
+
+- A compromised Docker/Podman runtime or a malicious sandbox image.
+- An agent with dual-gated network that exfiltrates what it already sees.
+- Malware already running on the host with access to your original files.
+- Deliberate misuse of `--allow-findings`, `--force`, or `--allow-network`.
+
+Verify installs with release `SHA256SUMS.txt` (or `install.sh`). Prefer pinned tags over opaque `main` checkouts. Details: [`SECURITY.md`](./SECURITY.md).
+
+Honest limitations: mug reduces risk; it does not make arbitrary agent code safe.
 
 ## Development
 
@@ -255,7 +277,7 @@ mypy mug
 python -m mug --version
 ```
 
-38 tests · ruff + mypy in CI · release workflow publishes wheels + SHA256 checksums.
+44 tests · ruff + mypy in CI · release workflow publishes wheels + SHA256 checksums.
 
 ## Contributing
 

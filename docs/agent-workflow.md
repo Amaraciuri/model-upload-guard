@@ -77,6 +77,16 @@ mug snapshots .
 mug restore ~/.local/state/model-upload-guard/snapshots/.../….tar.gz ../restored --yes
 ```
 
+## Agent rules file
+
+Copy [`examples/AGENTS.md`](../examples/AGENTS.md) into the workspace (or paste it into Cursor / Claude Code rules) so the model:
+
+- only edits the mug workspace
+- never touches `.env` / `.git` / secrets
+- finishes by telling you to run `mug diff` → `apply --dry-run` → `apply --yes`
+
+From the interactive menu: **a) Agent rules**.
+
 ## Pair with a command guard
 
 Use `mug` (data boundary) + a destructive-command guard (execution boundary). Neither replaces the other.

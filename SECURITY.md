@@ -42,10 +42,12 @@ We aim to acknowledge advisories within **7 days** (best effort for a free/MIT p
 
 ## Threat model
 
-See the README sections *How it works* and *Privacy & security*. mug reduces accidental secret export and unsafe apply; it does not stop a determined attacker with a compromised container runtime, malicious image, or an explicitly dual-gated network session.
+See the README section [*Threat model*](./README.md#threat-model). mug reduces accidental secret export and unsafe apply; it does not stop a determined attacker with a compromised container runtime, malicious image, or an explicitly dual-gated network session.
 
 ## Supply-chain notes
 
 - Runtime depends on the Python standard library only.
 - Prefer GitHub Release artifacts with `SHA256SUMS.txt` over installing opaque `main` snapshots.
+- Verify checksums before `pip install source.zip` (or use `install.sh`, which checks SHA256 when assets exist).
 - PyPI publish (when enabled) uses Trusted Publishing from this repository's `release` workflow.
+- Artifacts are integrity-checked via SHA256; cryptographic signing of `SHA256SUMS.txt` may be added in a later release.

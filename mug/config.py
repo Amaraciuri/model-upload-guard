@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -190,6 +191,14 @@ fail_on = "high"
 fail_on_unscanned = true
 entropy_threshold = 4.5
 entropy_min_length = 32
+# Extra org/team secret patterns (additive to built-ins):
+# [[scan.rules_add]]
+# severity = "high"
+# rule = "internal-token"
+# pattern = 'myorg_[A-Za-z0-9]{20,}'
+# message = "Internal org token"
+# Path globs where findings do not block export (prefer baseline for one-offs):
+allowlist_paths = []
 
 [export]
 # Additive only. Immutable secret/credential patterns cannot be removed.
@@ -220,12 +229,22 @@ home_size = "512m"
 
 
 @dataclass(slots=True)
+class CustomRule:
+    severity: str
+    rule: str
+    pattern: str
+    message: str
+
+
+@dataclass(slots=True)
 class Config:
     max_file_bytes: int = 1024 * 1024
     fail_on: str = "high"
     fail_on_unscanned: bool = True
     entropy_threshold: float = 4.5
     entropy_min_length: int = 32
+    rules_add: list[CustomRule] = field(default_factory=list)
+    allowlist_paths: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDES))
     max_changes: int = 200
     max_delete_ratio: float = 0.05
@@ -268,6 +287,36 @@ def _as_str_list(value: Any, label: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise MugError(f"{label} must be a list of strings")
     return list(value)
+
+
+def _parse_rules_add(value: Any) -> list[CustomRule]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise MugError("scan.rules_add must be a list of [[scan.rules_add]] tables")
+    rules: list[CustomRule] = []
+    for index, item in enumerate(value):
+        label = f"scan.rules_add[{index}]"
+        if not isinstance(item, dict):
+            raise MugError(f"{label} must be a table with severity, rule, pattern, message")
+        severity = str(item.get("severity", "high")).lower()
+        rule = str(item.get("rule", "")).strip()
+        pattern = str(item.get("pattern", ""))
+        message = str(item.get("message", "")).strip()
+        if severity not in {"low", "medium", "high", "critical"}:
+            raise MugError(f"{label}.severity must be low, medium, high, or critical")
+        if not rule or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", rule):
+            raise MugError(f"{label}.rule must be a short slug (e.g. internal-token)")
+        if not pattern or len(pattern) > 512:
+            raise MugError(f"{label}.pattern must be a non-empty regex (max 512 chars)")
+        if not message:
+            raise MugError(f"{label}.message is required")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise MugError(f"{label}.pattern is not a valid regex: {exc}") from exc
+        rules.append(CustomRule(severity=severity, rule=rule, pattern=pattern, message=message))
+    return rules
 
 
 def _unique(items: list[str]) -> list[str]:
@@ -366,6 +415,8 @@ def load_config(root: Path) -> Config:
         fail_on_unscanned=bool(scan.get("fail_on_unscanned", True)),
         entropy_threshold=float(scan.get("entropy_threshold", 4.5)),
         entropy_min_length=int(scan.get("entropy_min_length", 32)),
+        rules_add=_parse_rules_add(scan.get("rules_add")),
+        allowlist_paths=_as_str_list(scan.get("allowlist_paths"), "scan.allowlist_paths"),
         exclude=exclude,
         max_changes=int(apply.get("max_changes", 200)),
         max_delete_ratio=float(apply.get("max_delete_ratio", 0.05)),

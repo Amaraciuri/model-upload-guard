@@ -32,6 +32,7 @@ class Finding:
     excerpt: str = ""
     fingerprint: str = ""
     baselined: bool = False
+    allowlisted: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -195,6 +196,10 @@ def scan_tree(
         exportable.append(rel)
         findings.extend(scan_file(rel, path, config))
     findings.extend(_gitignored_findings(root, exportable))
+    if config.allowlist_paths:
+        for finding in findings:
+            if path_matches(finding.path, config.allowlist_paths):
+                finding.allowlisted = True
     if baseline:
         for finding in findings:
             if finding.fingerprint and finding.fingerprint in baseline:
@@ -295,8 +300,28 @@ def scan_file(rel: str, path: Path, config: Config) -> list[Finding]:
         ]
 
     findings: list[Finding] = []
+    custom_rules = [
+        (rule.severity, rule.rule, re.compile(rule.pattern), rule.message)
+        for rule in config.rules_add
+    ]
     for line_no, line in enumerate(text.splitlines(), start=1):
         for severity, rule, pattern, message in CONTENT_RULES:
+            match = pattern.search(line)
+            if match:
+                excerpt = _redact(line.strip(), match.start(), match.end())
+                material = line[match.start() : match.end()]
+                findings.append(
+                    Finding(
+                        severity,
+                        rule,
+                        rel,
+                        line_no,
+                        message,
+                        excerpt,
+                        fingerprint=make_fingerprint(rule, rel, material),
+                    )
+                )
+        for severity, rule, pattern, message in custom_rules:
             match = pattern.search(line)
             if match:
                 excerpt = _redact(line.strip(), match.start(), match.end())
@@ -416,7 +441,7 @@ def _redact(line: str, start: int, end: int) -> str:
 def blocks_export(findings: Iterable[Finding], fail_on: str, fail_on_unscanned: bool = True) -> bool:
     threshold = SEVERITY_ORDER[fail_on]
     for finding in findings:
-        if finding.baselined:
+        if finding.baselined or finding.allowlisted:
             continue
         if finding.rule in NON_BLOCKING_RULES:
             continue

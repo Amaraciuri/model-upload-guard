@@ -25,11 +25,14 @@ from .ui import (
     MenuNav,
     banner,
     c,
+    clear_screen,
     confirm,
     err,
     info,
     make_progress,
     ok,
+    print_agents_help,
+    print_change_preview,
     print_cheatsheet,
     print_guide,
     prompt,
@@ -38,7 +41,9 @@ from .ui import (
     render_menu,
     wait_return,
     warn,
+    wizard_header,
 )
+from .templates import AGENTS_MD
 from .utils import MugError, canonical_root
 from .workspace import create_pack, create_workspace
 
@@ -426,12 +431,14 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
             "protected_patterns": len(config.protected),
             "configure": "[apply] in .mug.toml — protected_add only adds; --force never bypasses protected",
         },
+        "scan_custom_rules": len(config.rules_add),
+        "scan_allowlist_paths": len(config.allowlist_paths),
         "warnings": warnings,
         "posture": "hardened" if not warnings and any(engines.values()) else "review",
         "install_hint": (
             "pip install model-upload-guard"
             if pypi_available
-            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.2/install.sh | MUG_REF=v0.3.2 bash"
+            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 bash"
         ),
     }
     if as_json:
@@ -467,9 +474,12 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
 
 
 def run_menu() -> int:
-    render_home(__version__)
+    first = True
     while True:
         try:
+            clear_screen()
+            render_home(__version__, compact=not first)
+            first = False
             render_menu()
             action = read_menu_choice()
             print()
@@ -477,7 +487,6 @@ def run_menu() -> int:
                 warn("Unknown choice. Pick a number from the menu (or q to quit).")
                 continue
             if action == "home":
-                render_home(__version__)
                 continue
             if action == "exit":
                 ok("Bye. Stay fail-closed.")
@@ -489,8 +498,6 @@ def run_menu() -> int:
                     ok("Bye. Stay fail-closed.")
                     return 0
                 info("Back to menu.")
-                print()
-                render_home(__version__)
                 continue
             except MugError as exc:
                 err(str(exc))
@@ -500,8 +507,6 @@ def run_menu() -> int:
                     if nav.kind == "quit":
                         ok("Bye. Stay fail-closed.")
                         return 0
-                print()
-                render_home(__version__)
                 continue
             if code is None:
                 try:
@@ -510,8 +515,6 @@ def run_menu() -> int:
                     if nav.kind == "quit":
                         ok("Bye. Stay fail-closed.")
                         return 0
-                print()
-                render_home(__version__)
                 continue
             if code not in {0, 1}:
                 return code
@@ -521,8 +524,6 @@ def run_menu() -> int:
                 if nav.kind == "quit":
                     ok("Bye. Stay fail-closed.")
                     return 0
-            print()
-            render_home(__version__)
         except KeyboardInterrupt:
             print()
             ok("Bye. Stay fail-closed.")
@@ -532,36 +533,55 @@ def run_menu() -> int:
                 ok("Bye. Stay fail-closed.")
                 return 0
             info("Back to menu.")
-            print()
-            render_home(__version__)
 
 
 def _menu_action(action: str) -> int | None:
     if action == "guide":
+        wizard_header("Quick start")
         print_guide()
         return None
     if action == "cheatsheet":
+        wizard_header("Cheat sheet")
         print_cheatsheet()
         return None
+    if action == "agents":
+        wizard_header("Agent rules")
+        print_agents_help()
+        if confirm("Write AGENTS.md in the current directory?", True):
+            destination = Path.cwd() / "AGENTS.md"
+            if destination.exists() and not confirm(f"{destination} exists — overwrite?", False):
+                info("Cancelled.")
+                raise MenuNav("back")
+            destination.write_text(AGENTS_MD, encoding="utf-8")
+            ok(f"Wrote {destination}")
+        return None
     if action == "doctor":
+        wizard_header("Doctor")
         _cmd_doctor(".", False)
         return None
     if action == "init":
+        wizard_header("Init")
         return dispatch(SimpleNamespace(command="init", path=".", force=False))
     if action == "scan":
+        wizard_header("Scan", 1, 2)
         info("Type b anytime to return to the menu.")
         path = prompt("Project path", ".")
+        wizard_header("Scan", 2, 2)
         return dispatch(SimpleNamespace(command="scan", path=path, json=False, update_baseline=False))
     if action == "update":
+        wizard_header("Update")
         if not confirm("Update mug from GitHub now?", True):
             info("Cancelled.")
             raise MenuNav("back")
         return dispatch(SimpleNamespace(command="update", ref=None, check=False, json=False))
     if action == "pack":
+        wizard_header("Pack", 1, 3)
         info("Type b anytime to return to the menu.")
         path = prompt("Project path", ".")
+        wizard_header("Pack", 2, 3)
         default_out = f"{Path(path).resolve().name}-sanitized.zip"
         output = prompt("ZIP output path", default_out)
+        wizard_header("Pack", 3, 3)
         allow = confirm("Allow findings and pack anyway?", False)
         return dispatch(
             SimpleNamespace(
@@ -573,11 +593,14 @@ def _menu_action(action: str) -> int | None:
             )
         )
     if action == "workspace":
+        wizard_header("Workspace", 1, 3)
         info("Type b anytime to return to the menu.")
         path = prompt("Project path", ".")
+        wizard_header("Workspace", 2, 3)
         root = Path(path).expanduser().resolve()
         default_out = str(root.parent / f"{root.name}-ai-workspace")
         output = prompt("Workspace output (outside the repo)", default_out)
+        wizard_header("Workspace", 3, 3)
         allow = confirm("Allow findings and continue anyway?", False)
         return dispatch(
             SimpleNamespace(
@@ -589,10 +612,12 @@ def _menu_action(action: str) -> int | None:
             )
         )
     if action == "diff":
+        wizard_header("Diff")
         info("Type b anytime to return to the menu.")
         workspace = prompt("Workspace path", required=True)
         return dispatch(SimpleNamespace(command="diff", workspace=workspace, json=False, no_patch=False))
     if action == "apply":
+        wizard_header("Apply", 1, 4)
         info("Type b anytime to return to the menu.")
         workspace = prompt("Workspace path", required=True)
         try:
@@ -607,16 +632,19 @@ def _menu_action(action: str) -> int | None:
         source_files = manifest.get("source_files", {})
         denominator = max(1, len(source_files) if isinstance(source_files, dict) else 1)
         delete_ratio = len(deletes) / denominator
-        print()
+        wizard_header("Apply", 2, 4)
         info(
-            f"Apply policy for this repo: max_changes={config.max_changes}, "
+            f"Apply policy: max_changes={config.max_changes}, "
             f"max_delete_ratio={config.max_delete_ratio:.1%} "
             f"(edit [apply] in .mug.toml — menu does not change these)"
         )
+        print_change_preview(changes)
         info(
-            f"This run: {len(actionable)} change(s), {len(deletes)} delete(s) "
-            f"({delete_ratio:.1%}). Protected paths cannot be forced."
+            f"This run vs limit: {len(actionable)}/{config.max_changes} changes, "
+            f"{len(deletes)} deletes ({delete_ratio:.1%} / {config.max_delete_ratio:.1%}). "
+            "Protected paths cannot be forced."
         )
+        wizard_header("Apply", 3, 4)
         dry = confirm("Dry-run only (recommended first)?", True)
         yes = True if dry else confirm("Apply for real? This writes the original repo.", False)
         if not dry and not yes:
@@ -624,10 +652,21 @@ def _menu_action(action: str) -> int | None:
             raise MenuNav("back")
         allow_delete = False
         if deletes and not dry:
+            wizard_header("Apply · deletions", 4, 4)
+            print(c("These paths would be deleted from the original repo:", BOLD, YELLOW))
+            for change in deletes[:40]:
+                print(f"  {c('DELETE', YELLOW, BOLD)}  {change.path}")
+            if len(deletes) > 40:
+                print(c(f"  … and {len(deletes) - 40} more", DIM))
+            print()
             allow_delete = confirm(
-                f"Allow {len(deletes)} deletion(s)? (limit {config.max_delete_ratio:.1%}; does not raise the limit)",
+                f"Allow {len(deletes)} deletion(s)? "
+                f"(limit {config.max_delete_ratio:.1%}; does not raise the limit)",
                 False,
             )
+            if not allow_delete:
+                info("Cancelled — deletions not permitted.")
+                raise MenuNav("back")
         need_force = len(actionable) > config.max_changes or delete_ratio > config.max_delete_ratio
         force = False
         if need_force and not dry:
@@ -636,6 +675,8 @@ def _menu_action(action: str) -> int | None:
             if not force:
                 info("Cancelled. Raise limits in .mug.toml or shrink the change set.")
                 raise MenuNav("back")
+        if dry or not deletes:
+            wizard_header("Apply", 4, 4)
         return dispatch(
             SimpleNamespace(
                 command="apply",
@@ -662,7 +703,8 @@ def _print_findings(findings: list[Finding]) -> None:
         ok("No findings.")
         return
     baselined = [item for item in findings if item.baselined]
-    active = [item for item in findings if not item.baselined]
+    allowlisted = [item for item in findings if item.allowlisted and not item.baselined]
+    active = [item for item in findings if not item.baselined and not item.allowlisted]
     for item in active:
         location = f"{item.path}:{item.line}" if item.line else item.path
         sev = item.severity.upper()
@@ -670,6 +712,13 @@ def _print_findings(findings: list[Finding]) -> None:
         print(f"{c(f'{sev:8}', color, BOLD)} {location} [{item.rule}] {item.message}")
         if item.excerpt:
             print(f"         {item.excerpt}")
+    if allowlisted:
+        print(
+            c(
+                f"{len(allowlisted)} allowlisted finding(s) via scan.allowlist_paths (not blocking)",
+                DIM,
+            )
+        )
     if baselined:
         print(c(f"{len(baselined)} baselined finding(s) accepted via .mug-baseline.json (not blocking)", DIM))
     if not active:

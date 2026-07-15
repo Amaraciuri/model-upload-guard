@@ -7,6 +7,14 @@ fail_on = "high"
 fail_on_unscanned = true
 entropy_threshold = 4.5
 entropy_min_length = 32
+# Extra org/team secret patterns (additive):
+# [[scan.rules_add]]
+# severity = "high"
+# rule = "internal-token"
+# pattern = 'myorg_[A-Za-z0-9]{20,}'
+# message = "Internal org token"
+# Paths whose findings never block export (prefer baseline for one-offs):
+allowlist_paths = []
 
 [export]
 # Additive only. Immutable secret/credential patterns cannot be removed.

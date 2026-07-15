@@ -61,12 +61,90 @@ def banner(version: str) -> None:
     print()
 
 
-def render_home(version: str, *, cwd: Path | None = None) -> None:
-    """VEXP-style home: big logo, tagline, live status, then menu is separate."""
+def clear_screen() -> None:
+    """Clear the terminal when interactive (disable with MUG_NO_CLEAR=1)."""
+    if os.environ.get("MUG_NO_CLEAR") or os.environ.get("CI"):
+        return
+    if not getattr(sys.stdout, "isatty", lambda: False)():
+        return
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+
+
+def wizard_header(title: str, step: int | None = None, total: int | None = None) -> None:
+    width = min(72, shutil.get_terminal_size((72, 20)).columns)
+    if step is not None and total is not None:
+        label = f" {title}  ·  step {step}/{total} "
+    else:
+        label = f" {title} "
+    print()
+    print(c("─" * width, DIM, ACCENT))
+    print(c(label, BOLD, ACCENT))
+    print(c("─" * width, DIM, ACCENT))
+    print()
+
+
+def print_change_preview(changes: list[object], *, max_deletes: int = 40) -> None:
+    """Pretty-print a short apply preview (used by the interactive menu)."""
+    from .apply import Change
+
+    typed = [item for item in changes if isinstance(item, Change)]
+    if not typed:
+        info("No changes in this workspace.")
+        return
+    counts = {"modify": 0, "add": 0, "delete": 0, "blocked": 0}
+    for change in typed:
+        counts[change.action] = counts.get(change.action, 0) + 1
+    print(
+        f"  {c('modify', GREEN)}={counts.get('modify', 0)}  "
+        f"{c('add', CYAN)}={counts.get('add', 0)}  "
+        f"{c('delete', YELLOW)}={counts.get('delete', 0)}  "
+        f"{c('blocked', RED)}={counts.get('blocked', 0)}"
+    )
+    deletes = [change for change in typed if change.action == "delete"]
+    if deletes:
+        print()
+        print(c("  Deletes (review carefully):", BOLD, YELLOW))
+        for change in deletes[:max_deletes]:
+            print(f"    {c('DELETE', YELLOW, BOLD)}  {change.path}")
+        if len(deletes) > max_deletes:
+            print(c(f"    … and {len(deletes) - max_deletes} more", DIM))
+    blocked = [change for change in typed if change.action == "blocked"]
+    if blocked:
+        print()
+        print(c("  Blocked / protected:", BOLD, RED))
+        for change in blocked[:15]:
+            print(f"    {c('BLOCKED', RED, BOLD)}  {change.path}  {c(change.reason, DIM)}")
+        if len(blocked) > 15:
+            print(c(f"    … and {len(blocked) - 15} more", DIM))
+    print()
+
+
+def print_agents_help() -> None:
+    print(c("Agent rules template", BOLD, ACCENT))
+    print()
+    print("  Drop AGENTS.md (or paste into Cursor / Claude Code rules) so the agent:")
+    print("  • only edits the mug workspace")
+    print("  • never touches .env / .git / secrets")
+    print("  • tells you to run mug diff → apply --dry-run → apply --yes")
+    print()
+    print(c("  Also see:", DIM), "docs/agent-workflow.md · examples/AGENTS.md")
+    print()
+
+
+def render_home(version: str, *, cwd: Path | None = None, compact: bool = False) -> None:
+    """VEXP-style home: big logo (or compact bar), tagline, live status."""
     cwd = cwd or Path.cwd()
+    if compact:
+        width = min(72, shutil.get_terminal_size((72, 20)).columns)
+        print(c("─" * width, DIM, ACCENT))
+        print(c(f"  mug v{version}", BOLD, ACCENT), c("· Model Upload Guard", DIM))
+        _print_status(cwd)
+        print(c("─" * width, DIM, ACCENT))
+        print()
+        return
     for line in LOGO_MUG.splitlines():
         print(c(line, BOLD, ACCENT), end="")
-        # Put version on the middle logo row for a compact header.
         if "██╔████╔██║" in line:
             print(f"  {c(f'v{version}', DIM)}")
         else:
@@ -199,6 +277,7 @@ class MenuItem:
 MENU_ITEMS: tuple[MenuItem, ...] = (
     MenuItem("1", "Quick start", "2-minute guide to the safe workflow", "guide", "Learn"),
     MenuItem("2", "Cheat sheet", "Every command with examples", "cheatsheet", "Learn"),
+    MenuItem("a", "Agent rules", "Copy AGENTS.md template for coding agents", "agents", "Learn"),
     MenuItem("3", "Doctor", "Python, config, sandbox posture", "doctor", "Setup"),
     MenuItem("4", "Init", "Create deny-by-default .mug.toml", "init", "Setup"),
     MenuItem("u", "Update", "Update mug from GitHub", "update", "Setup"),
@@ -206,7 +285,7 @@ MENU_ITEMS: tuple[MenuItem, ...] = (
     MenuItem("6", "Pack", "Sanitized ZIP for chat / browser AI", "pack", "Export"),
     MenuItem("7", "Workspace", "Sanitized copy for coding agents", "workspace", "Agent"),
     MenuItem("8", "Diff", "Review workspace changes + patches", "diff", "Agent"),
-    MenuItem("9", "Apply", "Snapshot + apply after review", "apply", "Agent"),
+    MenuItem("9", "Apply", "Preview deletes → snapshot → apply", "apply", "Agent"),
     MenuItem("q", "Quit", "Leave the menu anytime", "exit", ""),
 )
 
@@ -235,6 +314,10 @@ def print_guide() -> None:
         "max_changes / max_delete_ratio / protected_add live in .mug.toml [apply]; "
         "menu only asks about deletions — it does not raise thresholds. "
         "--force skips volume/git checks only, never protected paths.",
+    )
+    print(
+        c("Agents:", BOLD),
+        "copy examples/AGENTS.md (or menu → Agent rules) into the workspace so the model stays fail-closed.",
     )
     print(c("Recovery:", BOLD), "mug snapshot · mug snapshots · mug restore <archive> <dir> --yes")
     print()
@@ -267,9 +350,11 @@ def print_cheatsheet() -> None:
     print(c("Tips", BOLD, YELLOW))
     print("  • JSON output: add --json to scan/pack/workspace/diff/apply/doctor")
     print("  • Apply thresholds: .mug.toml [apply] max_changes / max_delete_ratio / protected_add")
+    print("  • Team rules: [[scan.rules_add]] + scan.allowlist_paths in .mug.toml")
+    print("  • Agents: examples/AGENTS.md (or mug menu → Agent rules)")
     print("  • --force: volume + git only — protected paths stay blocked")
     print("  • Quiet progress: MUG_NO_PROGRESS=1 or CI=1")
-    print("  • Disable color: NO_COLOR=1")
+    print("  • Disable color: NO_COLOR=1 · keep menu chalk: MUG_NO_CLEAR=1")
     print()
 
 
@@ -399,7 +484,7 @@ def render_menu() -> None:
     print()
     print(
         f"  {c('nav', DIM)}  "
-        f"{c('1–9 / u', BOLD)}=run  ·  "
+        f"{c('1–9 / a / u', BOLD)}=run  ·  "
         f"{c('Enter', BOLD)}/{c('b', BOLD)}=refresh  ·  "
         f"{c('q', BOLD, RED)}/{c('0', BOLD, RED)}=quit  ·  "
         f"in prompts: {c('b', BOLD)}=back"

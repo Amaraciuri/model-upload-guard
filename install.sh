@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO="${MUG_REPO:-Amaraciuri/model-upload-guard}"
-REF="${MUG_REF:-v0.3.2}"
+REF="${MUG_REF:-v0.3.3}"
 PYTHON="${PYTHON:-python3}"
 INSTALL_ROOT="${MUG_HOME:-${HOME}/.local/share/model-upload-guard}"
 VENV_DIR="${INSTALL_ROOT}/venv"
