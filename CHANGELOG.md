@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.4 - 2026-07-22
+
+Install/status/recovery UX: verified updates, local history, clearer first-run.
+
+- **`mug status`**: install root, state dir, snapshot count, last/recent runs (`--offline`, `--json`).
+- **Local history**: scan/pack/workspace/diff/apply/snapshot/restore append to private `history.json` under the state dir (never uploaded).
+- **`mug update` verifies SHA256** like `install.sh`; `--allow-unverified` for git-archive fallback.
+- **Recovery**: richer `mug snapshots` (reason/time/size), `mug restore --latest ../dir --yes`, menu **r) Recovery**.
+- **`mug doctor --offline`**: skip GitHub/PyPI; surface PATH / state_dir / install_root.
+- Installer PATH cliff fixed (absolute doctor hint + `hash -r`); uninstall prints state path.
+- Next-step messages on init exists, clean scan, missing Docker, bad workspace/ZIP paths.
+
 ## 0.3.3 - 2026-07-16
 
 Team scan rules, agent template, and richer interactive menu.

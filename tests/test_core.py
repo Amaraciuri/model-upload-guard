@@ -14,11 +14,12 @@ from mug.apply import apply_changes, compute_changes
 from mug.baseline import load_baseline, write_baseline
 from mug.cli import main
 from mug.config import IMMUTABLE_EXCLUDES, Config, load_config, path_matches
+from mug.history import last_run, load_history, record_run
 from mug.sandbox import _size_to_bytes, inspect_command, run_sandbox
 from mug.scanner import _entropy_findings, blocks_export, scan_tree
-from mug.snapshot import create_snapshot, restore_snapshot
+from mug.snapshot import create_snapshot, list_snapshot_details, restore_snapshot
 from mug.ui import ProgressBar, read_menu_choice
-from mug.update import is_newer, parse_version
+from mug.update import _expected_source_sha, is_newer, parse_version
 from mug.utils import MugError, normalize_rel
 from mug.workspace import create_pack, create_workspace, resolve_workspace
 
@@ -411,6 +412,10 @@ class UiAndProgressTests(unittest.TestCase):
             self.assertEqual(read_menu_choice(), "update")
         with patch("builtins.input", return_value="a"):
             self.assertEqual(read_menu_choice(), "agents")
+        with patch("builtins.input", return_value="s"):
+            self.assertEqual(read_menu_choice(), "status")
+        with patch("builtins.input", return_value="r"):
+            self.assertEqual(read_menu_choice(), "recovery")
         with patch("builtins.input", return_value=""):
             self.assertEqual(read_menu_choice(), "home")
         with patch("builtins.input", return_value="b"):
@@ -595,5 +600,67 @@ class GitignoreWarningTests(unittest.TestCase):
             self.assertEqual([f.path for f in flagged], ["local-config.txt"])
             # medium severity: warns but does not block at the default fail_on=high
             self.assertFalse(blocks_export(findings, "high", True))
+
+
+class HistoryAndStatusTests(unittest.TestCase):
+    def test_record_and_load_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            with patch("mug.history.state_dir", return_value=state):
+                record_run("scan", root=root, ok=True, summary={"findings": 0})
+                record_run("apply", root=root, ok=True, summary={"count": 1})
+                entries = load_history(limit=5)
+                self.assertEqual(entries[0]["command"], "apply")
+                self.assertEqual(last_run(command="scan", root=root)["command"], "scan")
+
+    def test_status_offline_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.txt").write_text("ok\n", encoding="utf-8")
+            with patch("sys.stdout", new_callable=io.StringIO) as out:
+                code = main(["status", str(root), "--offline", "--json"])
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["root"], str(root.resolve()))
+            self.assertIn("state_dir", payload)
+            self.assertIsNone(payload["update_available"])
+
+    def test_doctor_offline_skips_network_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("sys.stdout", new_callable=io.StringIO) as out:
+                code = main(["doctor", str(root), "--offline", "--json"])
+            payload = json.loads(out.getvalue())
+            self.assertTrue(payload["offline"])
+            self.assertIsNone(payload["pypi_available"])
+            self.assertIn("state_dir", payload)
+            # Exit may be 1 without docker — that's expected.
+            self.assertIn(code, {0, 1})
+
+    def test_snapshot_details_include_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            state = Path(tmp) / "state"
+            root.mkdir()
+            (root / "a.txt").write_text("x\n", encoding="utf-8")
+            with patch("mug.snapshot.state_dir", return_value=state), patch(
+                "mug.utils.state_dir", return_value=state
+            ):
+                archive = create_snapshot(root, reason="pre-apply")
+                details = list_snapshot_details(root)
+            self.assertEqual(len(details), 1)
+            self.assertEqual(details[0]["reason"], "pre-apply")
+            self.assertEqual(Path(str(details[0]["archive"])).resolve(), archive.resolve())
+
+
+class UpdateVerifyTests(unittest.TestCase):
+    def test_expected_source_sha_parses_sums(self) -> None:
+        digest = "a" * 64
+        text = f"{digest}  source.zip\nother  ignore\n"
+        self.assertEqual(_expected_source_sha(text), digest)
+        self.assertEqual(_expected_source_sha(f"{digest}  SOURCE_ARCHIVE\n"), digest)
+        self.assertIsNone(_expected_source_sha("not-a-sum\n"))
 
 

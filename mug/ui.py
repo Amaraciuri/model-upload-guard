@@ -279,13 +279,15 @@ MENU_ITEMS: tuple[MenuItem, ...] = (
     MenuItem("2", "Cheat sheet", "Every command with examples", "cheatsheet", "Learn"),
     MenuItem("a", "Agent rules", "Copy AGENTS.md template for coding agents", "agents", "Learn"),
     MenuItem("3", "Doctor", "Python, config, sandbox posture", "doctor", "Setup"),
+    MenuItem("s", "Status", "Install, state dir, last runs", "status", "Setup"),
     MenuItem("4", "Init", "Create deny-by-default .mug.toml", "init", "Setup"),
-    MenuItem("u", "Update", "Update mug from GitHub", "update", "Setup"),
+    MenuItem("u", "Update", "Update mug from GitHub (SHA256)", "update", "Setup"),
     MenuItem("5", "Scan", "Secrets & sensitive files here", "scan", "Export"),
     MenuItem("6", "Pack", "Sanitized ZIP for chat / browser AI", "pack", "Export"),
     MenuItem("7", "Workspace", "Sanitized copy for coding agents", "workspace", "Agent"),
     MenuItem("8", "Diff", "Review workspace changes + patches", "diff", "Agent"),
     MenuItem("9", "Apply", "Preview deletes → snapshot → apply", "apply", "Agent"),
+    MenuItem("r", "Recovery", "List / restore local snapshots", "recovery", "Agent"),
     MenuItem("q", "Quit", "Leave the menu anytime", "exit", ""),
 )
 
@@ -337,8 +339,9 @@ def print_cheatsheet() -> None:
         ("mug run <ws> -- cmd…", "Sandbox run (Docker/Podman)"),
         ("mug guard -- <cmd>", "Destructive-command preflight"),
         ("mug doctor", "Local posture check"),
+        ("mug status", "Install / state / last runs"),
         ("mug scan --update-baseline", "Accept reviewed findings individually"),
-        ("mug update [--check]", "Self-update from GitHub"),
+        ("mug update [--check]", "Self-update from GitHub (SHA256)"),
         ("mug snapshot / snapshots / restore", "Private recovery archives"),
     ]
     print(c("Command cheat sheet", BOLD, ACCENT))
@@ -484,7 +487,7 @@ def render_menu() -> None:
     print()
     print(
         f"  {c('nav', DIM)}  "
-        f"{c('1–9 / a / u', BOLD)}=run  ·  "
+        f"{c('1–9 / a / s / r / u', BOLD)}=run  ·  "
         f"{c('Enter', BOLD)}/{c('b', BOLD)}=refresh  ·  "
         f"{c('q', BOLD, RED)}/{c('0', BOLD, RED)}=quit  ·  "
         f"in prompts: {c('b', BOLD)}=back"

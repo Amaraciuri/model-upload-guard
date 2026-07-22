@@ -49,12 +49,16 @@ def choose_engine(config: Config) -> str:
         raise MugError("sandbox.engine must be auto, docker, or podman")
     if requested in {"docker", "podman"}:
         if not shutil.which(requested):
-            raise MugError(f"Sandbox engine not found: {requested}")
+            raise MugError(f"Sandbox engine not found: {requested}. Install it or set sandbox.engine=auto.")
         return requested
     for engine in ("podman", "docker"):
         if shutil.which(engine):
             return engine
-    raise MugError("No Docker or Podman installation found. MUG refuses an unsafe host fallback.")
+    raise MugError(
+        "No Docker or Podman installation found. "
+        "`mug run` needs a container engine; pack/workspace/diff/apply still work without one. "
+        "Install Docker or Podman, then re-run `mug doctor`."
+    )
 
 
 def run_sandbox(

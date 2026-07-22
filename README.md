@@ -38,14 +38,23 @@ AI coding tools are useful — and dangerous by default: they can upload `.env` 
 **Verified installer (recommended):** downloads the GitHub Release `source.zip` and checks SHA256.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.4/install.sh | MUG_REF=v0.3.4 bash
+```
+
+**Verify (PATH):**
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"   # if needed
+hash -r
 mug --version
+mug doctor --offline
+mug status
 ```
 
 If the release assets are still propagating, allow an unverified archive of that tag (audit the tag first):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 MUG_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.4/install.sh | MUG_REF=v0.3.4 MUG_ALLOW_UNVERIFIED=1 bash
 ```
 
 **From a local clone:**
@@ -59,8 +68,8 @@ cd model-upload-guard
 **Manual verified install:**
 
 ```bash
-curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.3/source.zip
-curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.3/SHA256SUMS.txt
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.4/source.zip
+curl -fsSL -O https://github.com/Amaraciuri/model-upload-guard/releases/download/v0.3.4/SHA256SUMS.txt
 # macOS: shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 # Linux: sha256sum -c SHA256SUMS.txt --ignore-missing
 pip install source.zip
@@ -68,11 +77,12 @@ pip install source.zip
 
 **PyPI** (`pip install model-upload-guard`) is enabled when Trusted Publishing is configured; until then prefer the commands above. `mug doctor` tells you which path is live.
 
-Update:
+Update (SHA256-verified by default):
 
 ```bash
 mug update --check
 mug update
+# mug update --allow-unverified   # only if release checksums are missing
 ```
 
 ## Quickstart
@@ -209,9 +219,10 @@ Use **both** mug and a command guard: mug controls *what leaves and returns*; dc
 | `mug diff` | Path changes + unified patches |
 | `mug apply` | Snapshot + apply (`--dry-run` first) |
 | `mug guard` | Preflight destructive shell patterns |
-| `mug doctor` | Python, config, sandbox posture (+ update hint) |
-| `mug update` | Self-update from GitHub (`--check` only) |
-| `mug snapshot` / `snapshots` / `restore` | Private local recovery archives |
+| `mug doctor` | Python, config, sandbox posture (`--offline` skips network) |
+| `mug status` | Install / state dir / last runs |
+| `mug update` | Self-update from GitHub (SHA256; `--check` / `--allow-unverified`) |
+| `mug snapshot` / `snapshots` / `restore` | Private local recovery (`restore --latest`) |
 
 Add `--json` on inspection commands for CI. Progress bars on TTY only (`MUG_NO_PROGRESS=1` or `CI=1` to disable).
 
@@ -248,7 +259,7 @@ Project `.mug.toml` merges over `~/.config/mug/config.toml`. See [`examples/mug.
 - **Immutable excludes** — `.env`, keys, credentials patterns always enforced.
 - **Dual-gated network** — `sandbox.network = true` **and** `mug run --allow-network`.
 - **Transactional apply** — failed apply rolls back; pre-apply snapshot kept.
-- **No phone-home** — `mug update` runs only when you ask; `doctor` may suggest an update if you run it online.
+- **No phone-home** — `mug update` runs only when you ask; `doctor`/`status` network checks are optional (`--offline`).
 
 ## Threat model
 
@@ -277,7 +288,7 @@ mypy mug
 python -m mug --version
 ```
 
-44 tests · ruff + mypy in CI · release workflow publishes wheels + SHA256 checksums.
+49 tests · ruff + mypy in CI · release workflow publishes wheels + SHA256 checksums.
 
 ## Contributing
 

@@ -64,7 +64,10 @@ def create_workspace(
     if destination == source or source in destination.parents:
         raise MugError("Workspace must be outside the source repository")
     if destination.exists() and any(destination.iterdir()):
-        raise MugError(f"Workspace destination is not empty: {destination}")
+        raise MugError(
+            f"Workspace destination is not empty: {destination}. "
+            "Choose a new empty path (e.g. ../project-ai-workspace)."
+        )
 
     hashes, excluded = build_manifest(source, config, on_progress=on_progress)
     findings = scan_tree(source, config, on_progress=on_progress, baseline=load_baseline(source))
@@ -146,7 +149,10 @@ def create_pack(
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
-        raise MugError(f"Output already exists: {output}")
+        raise MugError(
+            f"Output already exists: {output}. "
+            "Choose a new -o path or remove the existing ZIP first."
+        )
     temp = output.with_suffix(output.suffix + ".tmp")
     try:
         with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
@@ -183,7 +189,10 @@ def resolve_workspace(workspace: Path) -> tuple[Path, Path, dict[str, object]]:
     manifest_path = workspace / MANIFEST_NAME
     id_path = workspace / WORKSPACE_ID_NAME
     if not manifest_path.exists() or not id_path.exists():
-        raise MugError(f"Not a Model Upload Guard workspace: {workspace}")
+        raise MugError(
+            f"Not a Model Upload Guard workspace: {workspace}. "
+            "Create one with: mug workspace <project> -o <path-outside-repo>"
+        )
     workspace_id = id_path.read_text(encoding="utf-8").strip()
     if not workspace_id or any(ch for ch in workspace_id if ch not in "0123456789abcdef"):
         raise MugError("Workspace id is invalid")

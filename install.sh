@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO="${MUG_REPO:-Amaraciuri/model-upload-guard}"
-REF="${MUG_REF:-v0.3.3}"
+REF="${MUG_REF:-v0.3.4}"
 PYTHON="${PYTHON:-python3}"
 INSTALL_ROOT="${MUG_HOME:-${HOME}/.local/share/model-upload-guard}"
 VENV_DIR="${INSTALL_ROOT}/venv"
@@ -37,11 +37,14 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
   die "Python 3.11+ is required."
 fi
 
-"$PYTHON" - <<'PY'
+if ! "$PYTHON" - <<'PY'
 import sys
 if sys.version_info < (3, 11):
     raise SystemExit(1)
 PY
+then
+  die "Python 3.11+ is required (found $($PYTHON -V 2>&1))."
+fi
 
 if ! "$PYTHON" -m venv --help >/dev/null 2>&1; then
   die "Python's venv module is required."
@@ -89,11 +92,18 @@ case ":${PATH}:" in
   *":${BIN_DIR}:"*) ;;
   *)
     echo
-    echo "Add this directory to PATH:"
+    echo "mug is installed, but ${BIN_DIR} is not on your PATH."
+    echo "Add it for this shell:"
     echo "  export PATH=\"${BIN_DIR}:\$PATH\""
+    echo "  hash -r"
+    echo "Or run doctor with the absolute path:"
+    echo "  ${BIN_DIR}/mug doctor --offline"
     ;;
 esac
 
 echo
 echo "Installed Model Upload Guard (${REF})."
-echo "Run: mug doctor"
+echo "Next:"
+echo "  mug doctor --offline"
+echo "  mug status"
+echo "  mug"

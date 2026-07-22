@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "model-upload-guard"
-version = "0.3.3"
+version = "0.3.4"
 description = "Model-agnostic safety boundary for sharing code with AI agents and applying their changes safely."
 readme = "README.md"
 requires-python = ">=3.11"

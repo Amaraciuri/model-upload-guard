@@ -37,10 +37,16 @@ def load_baseline(root: Path) -> set[str]:
         return set()
     data = read_json(baseline_path)
     if not isinstance(data, dict) or int(data.get("format", 0)) != BASELINE_FORMAT:
-        raise MugError(f"Unsupported baseline format: {baseline_path}")
+        raise MugError(
+            f"Unsupported baseline format: {baseline_path}. "
+            f"Delete it and re-run `mug scan --update-baseline` if you still want a baseline."
+        )
     entries = data.get("findings", {})
     if not isinstance(entries, dict):
-        raise MugError(f"Invalid baseline contents: {baseline_path}")
+        raise MugError(
+            f"Invalid baseline contents: {baseline_path}. "
+            "Delete or fix the file, then re-scan."
+        )
     return {str(key) for key in entries}
 
 

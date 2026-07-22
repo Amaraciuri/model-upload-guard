@@ -14,7 +14,14 @@ from .baseline import BASELINE_NAME, load_baseline, write_baseline
 from .config import DEFAULT_CONFIG_TEXT, IMMUTABLE_EXCLUDES, load_config
 from .sandbox import inspect_command, run_sandbox
 from .scanner import NON_BLOCKING_RULES, Finding, blocks_export, scan_tree
-from .snapshot import create_snapshot, list_snapshots, restore_snapshot
+from .snapshot import (
+    create_snapshot,
+    latest_snapshot,
+    list_snapshot_details,
+    list_snapshots,
+    restore_snapshot,
+)
+from .history import last_run, load_history, record_run
 from .ui import (
     BOLD,
     CYAN,
@@ -44,7 +51,7 @@ from .ui import (
     wizard_header,
 )
 from .templates import AGENTS_MD
-from .utils import MugError, canonical_root
+from .utils import MugError, canonical_root, default_mug_bin, install_root, mug_on_path, state_dir
 from .workspace import create_pack, create_workspace
 
 
@@ -111,10 +118,18 @@ def parser() -> argparse.ArgumentParser:
 
     snapshots = sub.add_parser("snapshots", help="List private local recovery snapshots")
     snapshots.add_argument("path", nargs="?", default=".")
+    snapshots.add_argument("--json", action="store_true")
 
     restore = sub.add_parser("restore", help="Restore a snapshot into a new empty directory")
-    restore.add_argument("archive")
-    restore.add_argument("target")
+    restore.add_argument("archive", nargs="?", help="Snapshot archive path (or use --latest)")
+    restore.add_argument("target", nargs="?", help="Empty destination directory")
+    restore.add_argument("--latest", action="store_true", help="Use the newest snapshot for path")
+    restore.add_argument(
+        "--from",
+        dest="from_path",
+        default=".",
+        help="Project path used with --latest (default: .)",
+    )
     restore.add_argument("--yes", action="store_true")
 
     guard = sub.add_parser("guard", help="Check a command for obvious destructive operations")
@@ -134,10 +149,25 @@ def parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="Check local prerequisites and safety posture")
     doctor.add_argument("path", nargs="?", default=".")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip GitHub/PyPI checks (no network)",
+    )
+
+    status = sub.add_parser("status", help="Show install/state/last-run summary")
+    status.add_argument("path", nargs="?", default=".")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--offline", action="store_true", help="Skip update check")
 
     update = sub.add_parser("update", help="Update mug in place from GitHub")
     update.add_argument("--ref", help="Tag or branch to install (default: latest release)")
     update.add_argument("--check", action="store_true", help="Only check whether a newer version exists")
+    update.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Allow git-archive ZIP when release checksums are unavailable",
+    )
     update.add_argument("--json", action="store_true")
     return root
 
@@ -173,10 +203,14 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
         root = canonical_root(args.path)
         destination = root / ".mug.toml"
         if destination.exists() and not args.force:
-            raise MugError(f"Configuration already exists: {destination}")
+            raise MugError(
+                f"Configuration already exists: {destination}. "
+                "Re-run with --force to overwrite, or edit the file in place."
+            )
         destination.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
         ok(f"Wrote {destination}")
         info("Next: mug scan   then   mug pack -o project-for-ai.zip")
+        record_run("init", root=root, ok=True, summary={"config": str(destination)})
         return 0
 
     if command == "scan":
@@ -193,11 +227,25 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
             if not quiet:
                 ok(f"Baseline written: {baseline_path} ({count} finding(s) accepted)")
                 warn("Baselined findings no longer block export. Review them before committing the baseline.")
+        blocked = blocks_export(findings, config.fail_on, config.fail_on_unscanned)
         if args.json:
             print(json.dumps([item.to_dict() for item in findings], indent=2))
         else:
             _print_findings(findings)
-        return 1 if blocks_export(findings, config.fail_on, config.fail_on_unscanned) else 0
+            if not findings or not blocked:
+                info("Next: mug pack -o safe-for-ai.zip   or   mug workspace -o ../proj-ai")
+        record_run(
+            "scan",
+            root=root,
+            ok=not blocked,
+            summary={
+                "findings": len(findings),
+                "blocked": blocked,
+                "baselined": sum(1 for item in findings if item.baselined),
+                "allowlisted": sum(1 for item in findings if item.allowlisted),
+            },
+        )
+        return 1 if blocked else 0
 
     if command == "pack":
         root = canonical_root(args.path)
@@ -209,6 +257,12 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
         if bar is not None:
             bar.finish(c(f"✓ packed {result['files']} files → {result['output']}", GREEN) if not quiet else "")
         _print_result(result, args.json)
+        record_run(
+            "pack",
+            root=root,
+            ok=True,
+            summary={"output": str(result.get("output")), "files": result.get("files")},
+        )
         return 0
 
     if command == "workspace":
@@ -223,6 +277,14 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
                 c(f"✓ workspace ready → {result['workspace']}", GREEN) if not quiet else ""
             )
         _print_result(result, args.json)
+        if not quiet:
+            info(f"Next: mug run {result['workspace']} -- your-agent")
+        record_run(
+            "workspace",
+            root=root,
+            ok=True,
+            summary={"workspace": str(result.get("workspace")), "files": result.get("files")},
+        )
         return 0
 
     if command == "diff":
@@ -272,6 +334,17 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
                 + f"protected_blocked={protected}"
             )
             info("Thresholds live in .mug.toml [apply]; --force never bypasses protected paths.")
+        record_run(
+            "diff",
+            root=original,
+            ok=not any(change.action == "blocked" for change in changes),
+            summary={
+                "count": len(changes),
+                "deletes": deletes,
+                "protected_blocked": protected,
+                "workspace": str(workspace),
+            },
+        )
         return 1 if any(change.action == "blocked" for change in changes) else 0
 
     if command == "apply":
@@ -287,28 +360,84 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
             dry_run=args.dry_run,
         )
         _print_result(result, args.json)
+        record_run(
+            "apply",
+            root=original,
+            ok=True,
+            summary={
+                "count": result.get("count"),
+                "dry_run": result.get("dry_run"),
+                "snapshot": result.get("snapshot"),
+                "workspace": str(workspace),
+            },
+        )
         return 0
 
     if command == "snapshot":
-        archive = create_snapshot(canonical_root(args.path))
+        root = canonical_root(args.path)
+        archive = create_snapshot(root)
         ok(f"Snapshot: {archive}")
+        info(f"State dir: {state_dir()}")
+        record_run("snapshot", root=root, ok=True, summary={"archive": str(archive)})
         return 0
 
     if command == "snapshots":
         root = canonical_root(args.path)
-        archives = list_snapshots(root)
-        if not archives:
-            info("No snapshots yet. Create one with: mug snapshot")
+        details = list_snapshot_details(root)
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {"root": str(root), "state_dir": str(state_dir()), "snapshots": details},
+                    indent=2,
+                )
+            )
             return 0
-        for archive in archives:
-            print(archive)
+        if not details:
+            info("No snapshots yet. Create one with: mug snapshot")
+            info(f"State dir: {state_dir()}")
+            return 0
+        info(f"State dir: {state_dir()}")
+        for item in details:
+            created = item.get("created_at") or "?"
+            reason = item.get("reason") or "unknown"
+            size = int(item.get("size_bytes") or 0)
+            print(f"{created}  {reason:12}  {size:>8} B  {item['archive']}")
+        info("Restore latest into an empty dir: mug restore --latest ../restored --yes")
         return 0
 
     if command == "restore":
         if not args.yes:
             raise MugError("Restore is confirmation-gated. Re-run with --yes.")
-        restore_snapshot(Path(args.archive), Path(args.target))
-        ok(str(Path(args.target).expanduser().resolve()))
+        archive_arg = getattr(args, "archive", None)
+        target_arg = getattr(args, "target", None)
+        if getattr(args, "latest", False):
+            root = canonical_root(getattr(args, "from_path", "."))
+            archive_path = latest_snapshot(root)
+            if archive_path is None:
+                raise MugError(f"No snapshots found for {root}. Create one with: mug snapshot")
+            # `mug restore --latest ../restored --yes` puts the dir in archive_arg.
+            target_path = Path(target_arg or archive_arg or "")
+            if not str(target_path):
+                raise MugError(
+                    "Restore with --latest needs a target directory. "
+                    "Example: mug restore --latest ../restored --yes"
+                )
+        else:
+            if not archive_arg or not target_arg:
+                raise MugError(
+                    "Usage: mug restore <archive> <target> --yes   "
+                    "or   mug restore --latest ../restored --yes"
+                )
+            archive_path = Path(archive_arg)
+            target_path = Path(target_arg)
+        restore_snapshot(archive_path, target_path)
+        ok(str(target_path.expanduser().resolve()))
+        record_run(
+            "restore",
+            root=None,
+            ok=True,
+            summary={"archive": str(archive_path), "target": str(target_path)},
+        )
         return 0
 
     if command == "guard":
@@ -343,7 +472,18 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
         )
 
     if command == "doctor":
-        return _cmd_doctor(getattr(args, "path", "."), getattr(args, "json", False))
+        return _cmd_doctor(
+            getattr(args, "path", "."),
+            getattr(args, "json", False),
+            offline=bool(getattr(args, "offline", False)),
+        )
+
+    if command == "status":
+        return _cmd_status(
+            getattr(args, "path", "."),
+            getattr(args, "json", False),
+            offline=bool(getattr(args, "offline", False)),
+        )
 
     if command == "update":
         from .update import check_update, self_update
@@ -358,18 +498,22 @@ def dispatch(args: argparse.Namespace | SimpleNamespace) -> int:
             else:
                 ok(f"mug {payload['current']} is up to date (latest: {payload['latest']})")
             return 0 if not payload["update_available"] else 1
-        result = self_update(getattr(args, "ref", None))
+        result = self_update(
+            getattr(args, "ref", None),
+            allow_unverified=bool(getattr(args, "allow_unverified", False)),
+        )
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            ok(f"Updated {result['previous']} → {result['installed']} (ref {result['ref']})")
+            verified = "verified" if result.get("verified") else "unverified"
+            ok(f"Updated {result['previous']} → {result['installed']} (ref {result['ref']}, {verified})")
             info("Restart any running mug session to use the new version.")
         return 0
 
     raise MugError(f"Unsupported command: {command}")
 
 
-def _cmd_doctor(path: str, as_json: bool) -> int:
+def _cmd_doctor(path: str, as_json: bool, *, offline: bool = False) -> int:
     from .update import check_update
 
     root = canonical_root(path)
@@ -382,43 +526,54 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         warnings.append("allow_weaken_defaults=true can remove non-immutable export excludes")
     if config.sandbox_user in {"", "0:0", "root", "0"}:
         warnings.append("sandbox.user runs as root inside the container")
+    if not mug_on_path():
+        warnings.append(
+            f"`mug` not on PATH. Add ~/.local/bin or run: {default_mug_bin()} doctor"
+        )
 
     pypi_available = False
-    try:
-        import urllib.request
+    update_info: dict[str, object] = {
+        "current": __version__,
+        "latest": __version__,
+        "update_available": False,
+    }
+    if not offline:
+        try:
+            import urllib.request
 
-        with urllib.request.urlopen(
-            urllib.request.Request(
-                "https://pypi.org/pypi/model-upload-guard/json",
-                headers={"User-Agent": f"mug/{__version__}"},
-            ),
-            timeout=5,
-        ) as response:
-            pypi_available = response.status == 200
-    except Exception:
-        pypi_available = False
-    if not pypi_available:
-        # Informational only — do not fail doctor posture until PyPI is live.
-        pass
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    "https://pypi.org/pypi/model-upload-guard/json",
+                    headers={"User-Agent": f"mug/{__version__}"},
+                ),
+                timeout=5,
+            ) as response:
+                pypi_available = response.status == 200
+        except Exception:
+            pypi_available = False
+        try:
+            update_info = check_update()
+            if update_info.get("update_available"):
+                warnings.append(
+                    f"Update available: {update_info['current']} → {update_info['latest']}. Run: mug update"
+                )
+        except MugError:
+            pass
 
-    update_info: dict[str, object] = {"current": __version__, "latest": __version__, "update_available": False}
-    try:
-        update_info = check_update()
-        if update_info.get("update_available"):
-            warnings.append(
-                f"Update available: {update_info['current']} → {update_info['latest']}. Run: mug update"
-            )
-    except MugError:
-        pass
     payload = {
         "version": __version__,
-        "latest_version": update_info.get("latest"),
-        "update_available": update_info.get("update_available"),
-        "pypi_available": pypi_available,
+        "latest_version": None if offline else update_info.get("latest"),
+        "update_available": False if offline else update_info.get("update_available"),
+        "offline": offline,
+        "pypi_available": None if offline else pypi_available,
         "python": platform.python_version(),
         "platform": platform.platform(),
         "root": str(root),
         "config": str(root / ".mug.toml") if (root / ".mug.toml").exists() else "defaults",
+        "mug_on_path": mug_on_path(),
+        "mug_bin": str(default_mug_bin()),
+        "install_root": str(install_root()),
+        "state_dir": str(state_dir()),
         "sandbox_profile": config.sandbox_profile,
         "sandbox_engines": engines,
         "safe_sandbox_available": any(engines.values()),
@@ -438,7 +593,7 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
         "install_hint": (
             "pip install model-upload-guard"
             if pypi_available
-            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 bash"
+            else "curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.4/install.sh | MUG_REF=v0.3.4 bash"
         ),
     }
     if as_json:
@@ -464,13 +619,95 @@ def _cmd_doctor(path: str, as_json: bool) -> int:
             else:
                 print(f"{c(str(key), DIM)}: {value}")
         print()
-        info(f"Install: {payload['install_hint']}")
-        info("Tip: run `mug` for the interactive menu, or `mug guide` for the workflow.")
-        if not pypi_available:
-            info("PyPI not live yet — use the GitHub verified installer above.")
+        if not payload["safe_sandbox_available"]:
+            info("No container engine — pack/workspace/diff/apply still work; mug run needs Docker/Podman.")
+        if not mug_on_path():
+            info('Add to PATH: export PATH="$HOME/.local/bin:$PATH"  then: hash -r')
+        if not offline:
+            info(f"Install: {payload['install_hint']}")
+            if not pypi_available:
+                info("PyPI not live yet — use the GitHub verified installer above.")
+        else:
+            info("Offline mode: skipped GitHub/PyPI checks.")
+        info("Tip: mug status · mug · mug guide")
+    # Missing sandbox is advisory for pack-only users; still exit 1 so CI notices.
     if not payload["safe_sandbox_available"]:
         return 1
     return 1 if warnings else 0
+
+
+def _cmd_status(path: str, as_json: bool, *, offline: bool = False) -> int:
+    root = canonical_root(path)
+    config = load_config(root)
+    config_path = root / ".mug.toml"
+    snapshots = list_snapshots(root)
+    recent = load_history(limit=8)
+    last = last_run(root=root) or (recent[0] if recent else None)
+    workspaces_dir = state_dir() / "workspaces"
+    workspace_count = len(list(workspaces_dir.glob("*.json"))) if workspaces_dir.exists() else 0
+    update_available = None
+    if not offline:
+        try:
+            from .update import check_update
+
+            update_available = bool(check_update().get("update_available"))
+        except MugError:
+            update_available = None
+
+    payload = {
+        "version": __version__,
+        "root": str(root),
+        "config": str(config_path) if config_path.exists() else "defaults",
+        "mug_on_path": mug_on_path(),
+        "install_root": str(install_root()),
+        "state_dir": str(state_dir()),
+        "snapshots": len(snapshots),
+        "latest_snapshot": str(snapshots[0]) if snapshots else None,
+        "workspace_registries": workspace_count,
+        "update_available": update_available,
+        "last_run": last,
+        "recent": recent,
+        "apply_policy": {
+            "max_changes": config.max_changes,
+            "max_delete_ratio": config.max_delete_ratio,
+        },
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    banner(__version__)
+    print(f"{c('root', DIM)}: {payload['root']}")
+    print(f"{c('config', DIM)}: {payload['config']}")
+    print(f"{c('state_dir', DIM)}: {payload['state_dir']}")
+    print(f"{c('install_root', DIM)}: {payload['install_root']}")
+    on_path = c("yes", GREEN) if payload["mug_on_path"] else c("no", YELLOW)
+    print(f"{c('mug_on_path', DIM)}: {on_path}")
+    print(f"{c('snapshots', DIM)}: {payload['snapshots']}")
+    print(f"{c('workspace_registries', DIM)}: {payload['workspace_registries']}")
+    if update_available is True:
+        warn("Update available — run: mug update")
+    elif update_available is False:
+        ok("Up to date")
+    if last:
+        print()
+        print(c("Last run for this project", BOLD, CYAN))
+        print(
+            f"  {last.get('at', '?')}  {last.get('command')}  "
+            f"{'ok' if last.get('ok') else 'blocked'}  {last.get('summary', {})}"
+        )
+    if recent:
+        print()
+        print(c("Recent history", BOLD))
+        for entry in recent[:5]:
+            mark = "✓" if entry.get("ok") else "!"
+            print(
+                f"  {mark} {entry.get('at', '?')}  {entry.get('command')}  "
+                f"{Path(str(entry.get('root', ''))).name if entry.get('root') else '-'}"
+            )
+    print()
+    info("Recovery: mug snapshots · mug restore --latest ../restored --yes")
+    return 0
 
 
 def run_menu() -> int:
@@ -557,11 +794,23 @@ def _menu_action(action: str) -> int | None:
         return None
     if action == "doctor":
         wizard_header("Doctor")
-        _cmd_doctor(".", False)
+        _cmd_doctor(".", False, offline=False)
+        return None
+    if action == "status":
+        wizard_header("Status")
+        _cmd_status(".", False, offline=False)
         return None
     if action == "init":
         wizard_header("Init")
-        return dispatch(SimpleNamespace(command="init", path=".", force=False))
+        info("Type b anytime to return to the menu.")
+        path = prompt("Project path", ".")
+        force = False
+        if (Path(path).expanduser().resolve() / ".mug.toml").exists():
+            force = confirm(".mug.toml already exists — overwrite?", False)
+            if not force:
+                info("Cancelled.")
+                raise MenuNav("back")
+        return dispatch(SimpleNamespace(command="init", path=path, force=force))
     if action == "scan":
         wizard_header("Scan", 1, 2)
         info("Type b anytime to return to the menu.")
@@ -570,10 +819,40 @@ def _menu_action(action: str) -> int | None:
         return dispatch(SimpleNamespace(command="scan", path=path, json=False, update_baseline=False))
     if action == "update":
         wizard_header("Update")
-        if not confirm("Update mug from GitHub now?", True):
+        if not confirm("Update mug from GitHub now? (SHA256 verified)", True):
             info("Cancelled.")
             raise MenuNav("back")
-        return dispatch(SimpleNamespace(command="update", ref=None, check=False, json=False))
+        return dispatch(
+            SimpleNamespace(
+                command="update",
+                ref=None,
+                check=False,
+                allow_unverified=False,
+                json=False,
+            )
+        )
+    if action == "recovery":
+        wizard_header("Recovery", 1, 2)
+        info("Type b anytime to return to the menu.")
+        path = prompt("Project path", ".")
+        wizard_header("Recovery", 2, 2)
+        code = dispatch(SimpleNamespace(command="snapshots", path=path, json=False))
+        if confirm("Restore the latest snapshot into a new empty directory?", False):
+            target = prompt("Empty target directory", str(Path(path).resolve().parent / "restored"))
+            if not confirm(f"Restore latest → {target}?", False):
+                info("Cancelled.")
+                raise MenuNav("back")
+            return dispatch(
+                SimpleNamespace(
+                    command="restore",
+                    archive=None,
+                    target=target,
+                    latest=True,
+                    from_path=path,
+                    yes=True,
+                )
+            )
+        return code
     if action == "pack":
         wizard_header("Pack", 1, 3)
         info("Type b anytime to return to the menu.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import tempfile
 from pathlib import Path
@@ -16,7 +17,10 @@ class MugError(RuntimeError):
 def canonical_root(path: str | os.PathLike[str]) -> Path:
     root = Path(path).expanduser().resolve()
     if not root.exists():
-        raise MugError(f"Path does not exist: {root}")
+        raise MugError(
+            f"Path does not exist: {root}. "
+            "Pass an existing project directory (e.g. `.` or `./my-app`)."
+        )
     if not root.is_dir():
         raise MugError(f"Expected a directory: {root}")
     return root
@@ -75,6 +79,20 @@ def state_dir() -> Path:
     except OSError:
         pass
     return result
+
+
+def install_root() -> Path:
+    return Path(
+        os.environ.get("MUG_HOME", Path.home() / ".local" / "share" / "model-upload-guard")
+    ).expanduser()
+
+
+def mug_on_path() -> bool:
+    return bool(shutil.which("mug"))
+
+
+def default_mug_bin() -> Path:
+    return Path.home() / ".local" / "bin" / "mug"
 
 
 def atomic_write(path: Path, data: bytes, mode: int | None = None) -> None:

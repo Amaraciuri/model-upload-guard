@@ -10,8 +10,8 @@ Repository: `Amaraciuri/model-upload-guard`
 4. Tag and push:
 
 ```bash
-git tag -a v0.3.3 -m "Model Upload Guard v0.3.3"
-git push origin main v0.3.3
+git tag -a v0.3.4 -m "Model Upload Guard v0.3.4"
+git push origin main v0.3.4
 ```
 
 5. Confirm the **release** workflow produced:
@@ -21,8 +21,8 @@ git push origin main v0.3.3
 6. Verify install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.3/install.sh | MUG_REF=v0.3.3 bash
-mug --version   # 0.3.3
+curl -fsSL https://raw.githubusercontent.com/Amaraciuri/model-upload-guard/v0.3.4/install.sh | MUG_REF=v0.3.4 bash
+mug --version   # 0.3.4
 ```
 
 ## GitHub repo hygiene (one-time)
